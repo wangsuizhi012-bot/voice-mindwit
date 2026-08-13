@@ -1,0 +1,13 @@
+{
+  "mic_keyword": "",
+  "llm_base": "http://localhost:1234/v1",
+  "screenshot_mode": "active_window",
+  "screenshot_region": null,
+  "auto_send": false,
+  "hangover_s": 0.6,
+  "vad_aggressiveness": 3,
+  "cooldown_s": 1.0,
+  "vad_engine": "silero",
+  "wake_word": "",
+  "confirm_high_risk": false
+}

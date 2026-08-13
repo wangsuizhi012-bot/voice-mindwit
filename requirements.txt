@@ -1,0 +1,16 @@
+# 本地语音控制 RPA - 依赖清单
+# 安装: pip install -r requirements.txt  (建议先建虚拟环境)
+funasr
+modelscope
+torch
+torchaudio
+sounddevice
+requests              # LLM 意图解析的 HTTP 调用(必装, 否则启动即崩)
+pyautogui
+Pillow
+pywin32
+webrtcvad
+uiautomation          # 自主定位: Windows UI 自动化控件树
+silero-vad            # 鲁棒 VAD(主引擎, 比 webrtcvad 抗噪声)
+openwakeword          # 唤醒词(可选, 防 pyautogui 误触发)
+easyocr               # 视觉兜底定位(控件树取不到时截屏 OCR)
