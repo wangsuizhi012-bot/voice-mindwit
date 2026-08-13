@@ -103,3 +103,23 @@ voice-assistant/
   shots/               # 截图输出
   run_assistant.log    # 运行日志
 ```
+
+## 致谢（Acknowledgements）
+
+本项目站在以下开源项目的肩膀上，特此感谢：
+
+- **FunASR / SenseVoice**（[ModelScope/FunASR](https://github.com/modelscope/FunASR)，阿里巴巴达摩院）—— 中文语音识别主干，事实标准级准确率
+- **Silero VAD**（[snakers4/silero-vad](https://github.com/snakers4/silero-vad)）—— 神经网络端点检测，比 webrtcvad 更抗噪声
+- **openWakeWord**（[dscripka/openWakeWord](https://github.com/dscripka/openWakeWord)）—— 唤醒词门控，防环境音误触发
+- **Qwen**（[QwenLM/Qwen](https://github.com/QwenLM/Qwen)，阿里巴巴通义千问）+ **llama.cpp**（[ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)）—— 本地大模型意图解析，全程离线
+- **pyautogui**（[asweigart/pyautogui](https://github.com/asweigart/pyautogui)）—— 鼠标键盘执行
+- **uiautomation**（[yinkaisheng/Python-UIAutomation-for-Windows](https://github.com/yinkaisheng/Python-UIAutomation-for-Windows)）—— Windows UI 控件树，自主定位的核心
+- **EasyOCR**（[JaidedAI/EasyOCR](https://github.com/JaidedAI/EasyOCR)）—— 视觉兜底定位
+- **webrtcvad**（[wiseman/py-webrtcvad](https://github.com/wiseman/py-webrtcvad)）—— VAD 兜底引擎
+- **sounddevice / torch / Pillow / pywin32** —— 音频采集与底层支撑
+
+也感谢社区大量 RPA / 语音助手实践带来的设计启发。
+
+## 许可证
+
+[MIT](LICENSE) —— 可自由使用、修改、再分发，请保留原作者声明。
