@@ -199,8 +199,8 @@ def detect_model():
 
 SYS_PROMPT = """你是一个本地语音助手的中文意图解析器。用户说一句话，判断他想做什么，严格只返回 JSON，不要多余文字。
 可用动作:
-- "screenshot": 截取当前活动窗口(或全屏)并复制到剪贴板, 不发送。params:{}
-- "screenshot_send": 截图并粘贴到当前光标所在输入框然后发送(按回车)。仅当用户明确说"发送/发给我/发到..."时用。params:{}
+- "screenshot": 截取屏幕并复制到剪贴板, 不发送。默认截当前活动窗口。params:{"region":可选} region 可为: tl/tr/bl/br(左上/右上/左下/右下角)、left/right(左半/右半)、top/bottom(上半/下半)、full(全屏)。当用户说"截左上角/右上角/右下角/右半边/下半部分/整个屏幕"等时填对应 region; 只说"截图/截个图"不填则截当前窗口。
+- "screenshot_send": 截图并粘贴到当前光标所在输入框然后发送(按回车)。仅当用户明确说"发送/发给我/发到..."时用。params:{"region":可选}
 - "type": 把文字打到当前光标处。params:{"text":"要打的内容"}
 - "open": 打开程序。params:{"app":"应用名, 如 微信/记事本/资源管理器"}
 - "click_here": 在鼠标当前所在位置点击。**仅当用户只说"点一下/点这里/按一下"这类话、后面没有任何目标文字时**才用。params:{"button":"left","clicks":1}  (button 可 left/right, clicks 可 1 或 2 表示双击)
@@ -283,10 +283,41 @@ def get_shot_region():
     except Exception:
         return None
 
-def do_screenshot(send):
+# 区域截图: 把口语"左上角/右半边"等映射成屏幕 (x,y,w,h)
+_REGION_MAP = {
+    "tl": lambda w, h: (0, 0, w // 2, h // 2),
+    "tr": lambda w, h: (w // 2, 0, w // 2, h // 2),
+    "bl": lambda w, h: (0, h // 2, w // 2, h // 2),
+    "br": lambda w, h: (w // 2, h // 2, w // 2, h // 2),
+    "left": lambda w, h: (0, 0, w // 2, h),
+    "right": lambda w, h: (w // 2, 0, w // 2, h),
+    "top": lambda w, h: (0, 0, w, h // 2),
+    "bottom": lambda w, h: (0, h // 2, w, h // 2),
+}
+
+def resolve_region(region):
+    """把意图里的 region 解析成 (x,y,w,h) 或 None(全屏)。region 可为字符串(tl/tr/bl/br/left/right/top/bottom/full)或 [x,y,w,h]。"""
+    if not region:
+        return get_shot_region()
+    if isinstance(region, (list, tuple)) and len(region) == 4:
+        try:
+            return tuple(int(v) for v in region)
+        except Exception:
+            return get_shot_region()
+    if isinstance(region, str):
+        key = region.strip().lower()
+        if key in ("full", "全屏"):
+            return None
+        if key in _REGION_MAP:
+            import pyautogui
+            w, h = pyautogui.size()
+            return _REGION_MAP[key](w, h)
+    return get_shot_region()
+
+def do_screenshot(send, region=None):
     import pyautogui
-    region = get_shot_region()
-    img = pyautogui.screenshot(region=region) if region else pyautogui.screenshot()
+    r = resolve_region(region)
+    img = pyautogui.screenshot(region=r) if r else pyautogui.screenshot()
     ts = time.strftime("%Y%m%d_%H%M%S")
     path = os.path.join(SHOTS_DIR, "shot_" + ts + ".png")
     img.save(path)
@@ -523,9 +554,9 @@ def execute(intent, raw_text):
         OVN.set("听到：" + (raw_text or "") + "\n执行：" + str(action))
     try:
         if action == "screenshot":
-            do_screenshot(send=False)
+            do_screenshot(send=False, region=params.get("region"))
         elif action == "screenshot_send":
-            do_screenshot(send=True)
+            do_screenshot(send=True, region=params.get("region"))
         elif action == "type":
             type_text(params.get("text", ""))
         elif action == "open":
