@@ -42,6 +42,9 @@ CONFIG = {
     "confirm_high_risk": False,   # 高风险动作(发送/打字/打开/点击)执行前是否要语音二次确认
     "wake_word": "",              # 唤醒词模型名(openwakeword, 如 hey_jarvis); 留空=持续监听(不安全但省事)
     "vad_engine": "webrtcvad",    # webrtcvad | silero (silero 更鲁棒, 需装 silero-vad)
+    "stop_hotkey": "f8",         # 全局热键停止整个程序(防自动化跑飞); 值: f8/f9/f10/f11/esc/f5
+    "stop_recording_hotkey": "f9",  # 停止录制宏并保存(不退出程序); 值: f8/f9/f10/f11/esc/f5
+    "ocr_fallback": False,       # OCR 兜底(默认关: 边聊天边用会误命中聊天窗口文字; 需要时设 true)
 }
 
 def load_config():
@@ -112,6 +115,7 @@ class Overlay:
             self.root.geometry("580x150+12+12")
         except Exception:
             pass
+        self.rect = (12, 12, 580, 150)   # 小窗屏幕位置, 供 OCR 排除该区域(不关窗)
         self.var = tk.StringVar(value="监听中…\n（说 退出 停止）")
         self.label = tk.Label(self.root, textvariable=self.var,
                               font=("Microsoft YaHei UI", 12), wraplength=555,
@@ -199,14 +203,15 @@ SYS_PROMPT = """你是一个本地语音助手的中文意图解析器。用户�
 - "screenshot_send": 截图并粘贴到当前光标所在输入框然后发送(按回车)。仅当用户明确说"发送/发给我/发到..."时用。params:{}
 - "type": 把文字打到当前光标处。params:{"text":"要打的内容"}
 - "open": 打开程序。params:{"app":"应用名, 如 微信/记事本/资源管理器"}
-- "click_here": 在鼠标当前所在位置点击(用户已把鼠标移到目标, 说"点一下/点这里/点击/按一下"时用)。params:{"button":"left","clicks":1}  (button 可 left/right, clicks 可 1 或 2 表示双击)
-- "click_target": 点击屏幕上指定的控件(按钮/输入框/菜单项等), 系统会自动在前台窗口里找到它并移动鼠标点击, 用户无需移动鼠标。当用户说"点发送/点确定/点设置/点搜索/点登录/点xxx按钮/点xxx"时用。params:{"target":"控件上的文字, 如 发送/确定/设置/搜索"}
-- "click": 点击屏幕精确坐标(仅当用户明确说出坐标数字时才用)。params:{"x":0,"y":0}
+- "click_here": 在鼠标当前所在位置点击。**仅当用户只说"点一下/点这里/按一下"这类话、后面没有任何目标文字时**才用。params:{"button":"left","clicks":1}  (button 可 left/right, clicks 可 1 或 2 表示双击)
+- "click_target": 点击屏幕上指定的控件(按钮/输入框/菜单项等), 系统会自动在前台窗口里找到它并移动鼠标点击, 用户无需移动鼠标。**只要用户说"点/点击/按"后面跟了具体目标文字(如"点发送""点击一下默认权限""点确定按钮""点搜索"), 就必须用 click_target**, 让系统自己移动鼠标去找。params:{"target":"控件上的文字, 如 发送/确定/设置/搜索","hover":false}  当用户说"悬停/移到/放到 xxx 上"(只移动鼠标不点击)时 hover 填 true
+- "click": 点击屏幕精确坐标(仅当用户明确说出坐标数字如"点 100 200"时才用, 否则绝不用)。params:{"x":0,"y":0}
 - "press": 按键或热键。单键用 params:{"key":"enter"} (key 可为 enter/space/f5/esc/backspace/delete/home/end/up/down/left/right/tab 等); 组合键用 params:{"keys":["ctrl","s"]} (ctrl/alt/shift + 字母或功能键)。常见: "保存"->ctrl+s, "复制"->ctrl+c, "粘贴"->ctrl+v, "全选"->ctrl+a, "刷新"->f5, "回车/确认/发送"->enter
+- "scroll": 滚动鼠标滚轮。params:{"amount":3} 正数向上滚、负数向下滚。当用户说"往下滚/向上滚/往下翻/往上翻/滚动页面/滚轮"时用
 - "none": 闲聊或无需操作。params:{}
 返回格式: {"action":"...","params":{...},"reply":"一句话回复(中文,可选)"}
-如果是命令类(截图/打开/打字/点击/按键/发送)务必返回对应 action；普通聊天返回 none。口语映射: "点一下/点这里/点那个/按一下"->click_here; "双击"->click_here{clicks:2}; "右键"->click_here{button:right}; "回车/确认"->press{key:enter}; "保存/复制/粘贴/全选/刷新/撤销/剪切"->对应热键 press。
-重要: 用户说"复制/粘贴/剪切/全选/保存/刷新/撤销"指的是键盘快捷键操作, 必须返回 press 动作(对应 ctrl+c / ctrl+v / ctrl+x / ctrl+a / ctrl+s / f5 / ctrl+z), 绝不要返回 type 或 none。用户说"点xxx/点击xxx/按一下xxx"指的是点击某个界面元素, 优先返回 click_target{target:"xxx"}; 只有当用户明确说"点一下/点这里"且明显指鼠标当前位置时返回 click_here。"""
+如果是命令类(截图/打开/打字/点击/按键/发送)务必返回对应 action；普通聊天返回 none。口语映射: 只"点一下/点这里/按一下"(无目标文字)->click_here; "点/点击 + 具体目标文字"(如"点发送""点击一下默认权限")->click_target; "双击"->click_here{clicks:2}; "右键"->click_here{button:right}; "回车/确认"->press{key:enter}; "保存/复制/粘贴/全选/刷新/撤销/剪切"->对应热键 press。
+重要: 用户说"复制/粘贴/剪切/全选/保存/刷新/撤销"指的是键盘快捷键操作, 必须返回 press 动作(对应 ctrl+c / ctrl+v / ctrl+x / ctrl+a / ctrl+s / f5 / ctrl+z), 绝不要返回 type 或 none。用户说"点xxx/点击xxx/点一下xxx/按一下xxx按钮"(带具体目标文字)指的是点击某个界面元素, 必须返回 click_target{target:"xxx"}让鼠标自己移动去找; 只有当用户只说"点一下/点这里/按一下"(完全没有目标文字)时才返回 click_here。"""
 
 def parse_json(text):
     try:
@@ -344,25 +349,28 @@ def click_here(button="left", clicks=1):
         _teach_pending = None
         if tgt:
             try:
-                from locate import save_click
+                from locate import save_click, save_template
                 save_click(tgt, x, y)
-                log("  已把'点%s'记进记忆库, 下次直接点" % tgt)
+                tpl = save_template(tgt, x, y)
+                extra = "，并已存模板" if tpl else ""
+                log("  已把'点%s'记进记忆库%s, 下次直接点" % (tgt, extra))
                 if OVN:
                     OVN.set("已学会：点%s（下次直接命中）" % tgt)
             except Exception as e:
                 log("  记录记忆失败: " + repr(e))
 
-def click_target(target):
-    """自主定位并点击前台窗口里的目标控件(用户无需移动鼠标)。
-    顺序: 控件树 -> 记忆库(学过的相对坐标) -> OCR 兜底。
-    全失败则进入'教学': 请用户手动点一下, 下次直接复用。"""
+def click_target(target, hover=False):
+    """自主定位并点击(或悬停)前台窗口里的目标控件(用户无需移动鼠标)。
+    顺序: 控件树 -> 记忆库(学过的相对坐标) -> 模板匹配(教学存的图) -> OCR 兜底。
+    hover=True 时只移动鼠标不点击(防误触预览)。全失败则进入'教学'。"""
     import pyautogui
     try:
-        from locate import find_control, recall_click, find_by_ocr
+        from locate import find_control, recall_click, find_by_template, find_by_ocr
     except Exception:
         try:
             import locate as _loc
-            find_control, recall_click, find_by_ocr = _loc.find_control, _loc.recall_click, _loc.find_by_ocr
+            find_control, recall_click, find_by_template, find_by_ocr = \
+                _loc.find_control, _loc.recall_click, _loc.find_by_template, _loc.find_by_ocr
         except Exception as e:
             log("  定位模块不可用: " + repr(e))
             return False
@@ -376,21 +384,22 @@ def click_target(target):
                 pt, info = mpt, minfo
         except Exception as e:
             log("  记忆库查询失败: " + repr(e))
-    # 3) OCR 兜底(截全屏前先隐藏置顶小窗)
+    # 3) 模板匹配(按图找, 小窗文字不会误匹配目标小图, 无需藏小窗)
     if pt is None:
-        if OVN is not None:
-            try:
-                OVN.root.withdraw()
-            except Exception:
-                pass
         try:
-            pt, info = find_by_ocr(target)
-        finally:
-            if OVN is not None:
-                try:
-                    OVN.root.deiconify()
-                except Exception:
-                    pass
+            tpt, tinfo = find_by_template(target)
+            if tpt:
+                pt, info = tpt, tinfo
+            else:
+                log("  模板匹配: " + str(tinfo))
+        except Exception as e:
+            log("  模板匹配出错: " + repr(e))
+    # 4) OCR 兜底(默认关闭: 边聊天边用会误命中聊天窗口文字; config.ocr_fallback=true 才启用)
+    if pt is None and CONFIG.get("ocr_fallback"):
+        excl = None
+        if OVN is not None:
+            excl = getattr(OVN, "rect", None)
+        pt, info = find_by_ocr(target, exclude=excl)
     if pt is None:
         global _teach_pending
         _teach_pending = {"target": target}
@@ -399,10 +408,16 @@ def click_target(target):
             OVN.set("没找到'%s', 请手动点一下目标位置" % target)
         return False
     x, y = pt
-    pyautogui.click(int(x), int(y))
-    log("  已自主定位并点击 (%d, %d): %s" % (x, y, info))
-    if OVN:
-        OVN.set("听到：点" + (target or "") + "\n已点击：" + str(info))
+    if hover:
+        pyautogui.moveTo(int(x), int(y), duration=0.2)
+        log("  已悬停到 (%d, %d): %s" % (x, y, info))
+        if OVN:
+            OVN.set("听到：移到" + (target or "") + "\n已悬停：" + str(info))
+    else:
+        pyautogui.click(int(x), int(y))
+        log("  已自主定位并点击 (%d, %d): %s" % (x, y, info))
+        if OVN:
+            OVN.set("听到：点" + (target or "") + "\n已点击：" + str(info))
     return True
 
 def press_key(key=None, keys=None):
@@ -423,10 +438,12 @@ CANCEL_WORDS = ["取消", "不", "算了", "别", "no", "cancel"]
 
 # ---- 安全层: 动作白名单 + JSON 校验 + 高风险确认 ----
 ALLOWED_ACTIONS = {"screenshot", "screenshot_send", "type", "open",
-                   "click", "click_here", "click_target", "press", "none"}
+                   "click", "click_here", "click_target", "press", "scroll", "none"}
 HIGH_RISK_ACTIONS = {"screenshot_send", "type", "open", "click", "click_target"}
 _pending = {"intent": None}
 _teach_pending = None   # 教学态: click_target 失败时, 等用户手动点一下记进记忆库
+_recording = None       # 录制宏: 非 None 时表示正在录制, {"name":..., "steps":[...]}
+_pending_flow = None    # 重放流程前的整体二次确认, 存步骤列表
 
 def validate_intent(intent):
     """校验 LLM 返回的意图 JSON。返回 (ok, reason)。解析失败/越界一律拒绝执行。"""
@@ -446,6 +463,11 @@ def validate_intent(intent):
         return False, "open 缺 app"
     if action == "click_target" and not isinstance(params.get("target"), str):
         return False, "click_target 缺 target"
+    if action == "scroll":
+        try:
+            int(params.get("amount"))
+        except Exception:
+            return False, "scroll 缺 amount"
     if action == "click":
         try:
             int(params.get("x")); int(params.get("y"))
@@ -514,7 +536,12 @@ def execute(intent, raw_text):
             click_here(button=params.get("button", "left"),
                        clicks=int(params.get("clicks", 1)))
         elif action == "click_target":
-            click_target(params.get("target", ""))
+            click_target(params.get("target", ""), hover=bool(params.get("hover")))
+        elif action == "scroll":
+            import pyautogui
+            amt = int(params.get("amount", 3))
+            pyautogui.scroll(amt)
+            log("  已滚动滚轮: " + str(amt))
         elif action == "press":
             k = params.get("key")
             ks = params.get("keys")
@@ -532,6 +559,113 @@ def execute(intent, raw_text):
             log("  未知动作: " + str(action))
     except Exception as e:
         log("执行动作出错: " + repr(e))
+
+# ---- 录制宏: 一串语音指令录成命名流程, 一句话重放 ----
+def _extract_after(text, kws):
+    """提取关键词之后的名字(去标点/空格)。"""
+    for kw in kws:
+        i = text.find(kw)
+        if i >= 0:
+            rest = text[i + len(kw):]
+            rest = "".join(ch for ch in rest if ch not in "，。,.?!！? 的着吧啊")
+            return rest.strip()
+    return ""
+
+def _clean_flow_name(name):
+    """去掉名字前的前缀词(叫/为/名为/命名为/保存为)。"""
+    name = (name or "").strip()
+    for pre in ("命名为", "名字叫", "名为", "保存为", "叫", "为"):
+        if name.startswith(pre):
+            name = name[len(pre):].strip()
+            break
+    return name
+
+def _handle_macro(text):
+    """处理录制宏 meta 指令(开始/停止/重放), 返回 True 表示已吞掉不再走 LLM。"""
+    global _recording, _pending_flow
+    # 录制中: "停止/结束/保存/完成" 都触发停止保存
+    if _recording is not None:
+        if any(w in text for w in ("停止", "结束", "保存", "完成")):
+            name = _extract_after(text, ("停止", "结束", "保存", "完成"))
+            _stop_record(name)
+            return True
+    # 开始录制: 不在录制中时, 只要含"录制/记录/录屏"即触发
+    if _recording is None and any(w in text for w in ("录制", "记录", "录屏")):
+        _start_record()
+        return True
+    # 重放流程
+    for kw in ("执行流程", "运行流程", "跑流程", "重放", "执行宏", "运行宏"):
+        if kw in text:
+            name = _extract_after(text, (kw,))
+            _run_flow(name)
+            return True
+    return False
+
+def _start_record():
+    global _recording
+    _recording = {"name": "", "steps": []}
+    log("  ▶ 开始录制：逐步说你的指令；说「停止」保存")
+    if OVN:
+        OVN.set("正在录制…\n逐步说指令，说「停止」保存")
+
+def _stop_record(name):
+    global _recording
+    steps = (_recording or {}).get("steps", []) if _recording else []
+    _recording = None
+    if not steps:
+        log("  录制为空，未保存")
+        if OVN:
+            OVN.set("录制为空，未保存")
+        return
+    from macro import save_flow, list_flows
+    nm = _clean_flow_name(name) or ("flow_%d" % (len(list_flows()) + 1))
+    path = save_flow(nm, steps)
+    log("  已保存流程「%s」共 %d 步 -> %s" % (nm, len(steps), path))
+    if OVN:
+        OVN.set("已保存流程「%s」\n共 %d 步。说「执行流程%s」重放" % (nm, len(steps), nm))
+
+def _run_flow(name):
+    global _pending_flow
+    from macro import load_flow, list_flows
+    name = _clean_flow_name(name)
+    if not name:
+        flows = list_flows()
+        if not flows:
+            log("  还没有录制过流程，先说「开始录制」")
+            if OVN:
+                OVN.set("还没有录制过流程\n先说「开始录制」")
+            return
+        name = flows[-1]   # 默认最近一个
+    data = load_flow(name)
+    if not data:
+        log("  找不到流程「%s」，已有：%s" % (name, "、".join(list_flows())))
+        if OVN:
+            OVN.set("找不到流程「%s」\n已有：%s" % (name, "、".join(list_flows())))
+        return
+    steps = data.get("steps", [])
+    _pending_flow = steps
+    log("  [待确认] 执行流程「%s」共 %d 步？说 确认 或 取消" % (data.get("name", name), len(steps)))
+    if OVN:
+        OVN.set("执行流程「%s」共 %d 步？\n说 确认 或 取消" % (data.get("name", name), len(steps)))
+
+def _execute_flow(steps):
+    for i, st in enumerate(steps, 1):
+        if not RUNNING:
+            break
+        ok, reason = validate_intent(st)
+        if not ok:
+            log("  流程第 %d 步校验失败，跳过: %s" % (i, reason))
+            continue
+        log("  [流程 %d/%d] %s %s" % (i, len(steps), st.get("action"),
+                                      json.dumps(st.get("params", {}), ensure_ascii=False)))
+        try:
+            execute(st, "")
+        except Exception as e:
+            log("  流程第 %d 步执行出错: %s" % (i, repr(e)))
+        time.sleep(0.6)
+    log("  流程执行完毕")
+    if OVN:
+        OVN.set("流程执行完毕")
 
 # ---- 监听 ----
 class Listener:
@@ -606,6 +740,8 @@ class Listener:
         if OVN:
             OVN.set("监听中…\n（说 退出 停止）")
         while self.running:
+            if not RUNNING:
+                break
             try:
                 data = self.q.get(timeout=1.0)
             except queue.Empty:
@@ -708,6 +844,7 @@ class Listener:
         on_segment(audio)
 
 def on_segment(audio):
+    global _pending_flow
     text = transcribe(audio)
     if not text or not text.strip():
         return
@@ -715,6 +852,9 @@ def on_segment(audio):
     log("──────── 听到：" + text)
     if OVN:
         OVN.set("听到：" + text + "\n（理解中…）")
+    # 录制宏 meta 指令(优先, 避免"停止录制"被 STOP_WORDS 的"停止"误判退出)
+    if _handle_macro(text):
+        return
     # 停止词(最高优先级)
     low = text.lower()
     if any(w in low for w in STOP_WORDS):
@@ -722,6 +862,18 @@ def on_segment(audio):
         global RUNNING
         RUNNING = False
         return
+    # 待确认状态: 流程重放确认(优先)
+    if _pending_flow is not None:
+        if any(w in text for w in CONFIRM_WORDS):
+            steps = _pending_flow
+            _pending_flow = None
+            log("  确认执行流程")
+            _execute_flow(steps)
+            return
+        if any(w in text for w in CANCEL_WORDS):
+            log("  已取消流程执行")
+            _pending_flow = None
+            return
     # 待确认状态: 上一条高风险指令等着你确认
     if _pending["intent"] is not None:
         if any(w in text for w in CONFIRM_WORDS):
@@ -744,8 +896,13 @@ def on_segment(audio):
         if OVN:
             OVN.set("拒绝：" + reason)
         return
-    # 高风险动作二次确认(可选)
+    # 录制态: 把这条有效指令记进当前流程
     action = intent.get("action")
+    if _recording is not None and action != "none":
+        _recording["steps"].append(intent)
+        log("  [录制 %d] %s %s" % (len(_recording["steps"]), action,
+                                   json.dumps(intent.get("params", {}), ensure_ascii=False)))
+    # 高风险动作二次确认(可选)
     if CONFIG.get("confirm_high_risk") and action in HIGH_RISK_ACTIONS:
         _pending["intent"] = intent
         msg = "确认 " + str(action) + " 吗？说 确认 或 取消"
@@ -757,10 +914,53 @@ def on_segment(audio):
 
 # ---- 主流程 ----
 RUNNING = True
+
+# ---- 全局热键停止(防自动化跑飞, 借鉴 RPA.exe) ----
+_HOTKEY_VK = {"f5": 0x74, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "esc": 0x1B}
+
+def stop_hotkey_watcher():
+    """后台线程轮询全局热键: stop_hotkey=停止整个程序; stop_recording_hotkey=停止录制宏并保存。"""
+    import win32api
+    global RUNNING, _recording
+    stop_key = str(CONFIG.get("stop_hotkey", "f8")).lower()
+    stop_vk = _HOTKEY_VK.get(stop_key, 0x77)
+    rec_key = str(CONFIG.get("stop_recording_hotkey", "f9")).lower()
+    rec_vk = _HOTKEY_VK.get(rec_key, 0x78)
+    log("  热键: %s=停止整个程序 | %s=停止录制并保存" % (stop_key.upper(), rec_key.upper()))
+    while RUNNING:
+        try:
+            if win32api.GetAsyncKeyState(stop_vk) & 0x8000:
+                log("  [热键 %s] 触发，停止整个程序" % stop_key.upper())
+                _recording = None
+                RUNNING = False
+                if OVN:
+                    OVN.set("已按 %s 停止程序" % stop_key.upper())
+                break
+            if win32api.GetAsyncKeyState(rec_vk) & 0x8000:
+                if _recording is not None:
+                    _stop_record("")
+                    log("  [热键 %s] 已停止录制" % rec_key.upper())
+                else:
+                    log("  [热键 %s] 当前未在录制" % rec_key.upper())
+                time.sleep(0.3)   # 防抖, 避免一次按下重复触发
+        except Exception:
+            pass
+        time.sleep(0.1)
+
 def main():
     global RUNNING, OVN
     import pyautogui
     pyautogui.FAILSAFE = False
+    # 设置 DPI 感知: Windows 缩放(125%/150%)下, 截图/模板匹配/点击坐标才能和用户手动截的图一致
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)   # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
     setup_logging()
     # 置顶小窗(可选, 失败也不影响主功能)
     try:
@@ -773,6 +973,7 @@ def main():
     detect_model()
     device = choose_mic()
     lis = Listener(device)
+    threading.Thread(target=stop_hotkey_watcher, daemon=True).start()
     try:
         lis.start()
     except KeyboardInterrupt:

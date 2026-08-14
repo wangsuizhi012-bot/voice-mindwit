@@ -2,9 +2,13 @@ __pycache__/
 venv/
 models/
 shots/
+templates/
+flows/
 *.log
+*.png
 click_memory.json
 
 # 内部文件，不进公开仓库
 交接.md
+测试文档.md
 交付记录/

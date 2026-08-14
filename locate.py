@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """定位层: 把"点发送"这类口语指令解析成屏幕坐标。
 主路径: Windows UI 自动化树(uiautomation, 纯 Python, 零额外模型, 标准软件命中率最高)。
-兜底:   截图 + OCR(easyocr, 可选; 用于游戏/自绘 UI 等无障碍树取不到的界面)。
+兜底:   模板图像匹配(pyautogui.locateCenterOnScreen, 借鉴 waterRPA, 需教学存 templates/) 与
+        OCR(easyocr, 可选; 用于游戏/自绘 UI 等无障碍树取不到的界面)。
 
 用法:
-    from locate import find_control, find_by_ocr
+    from locate import find_control, find_by_ocr, find_by_template, save_template
     pt, info = find_control("发送")      # -> (cx, cy) 或 (None, 原因)
 """
 import os
 import time
+
+TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 
 def _enum_uia(timeout=3.0):
@@ -86,19 +89,37 @@ def find_control(target):
     return None, "控件树无匹配 '%s'" % t
 
 
-def find_by_ocr(target):
-    """兜底: 截图 + OCR 找文字(需 pip install easyocr)。未装则返回 None。"""
+_ocr_reader = None   # easyocr Reader 单例, 避免每次 OCR 都重新初始化(极慢)
+
+def _get_ocr_reader():
+    global _ocr_reader
+    if _ocr_reader is None:
+        import easyocr
+        _ocr_reader = easyocr.Reader(["ch_sim", "en"], gpu=False)
+    return _ocr_reader
+
+
+def find_by_ocr(target, exclude=None):
+    """兜底: 截图 + OCR 找文字(需 pip install easyocr)。Reader 缓存复用, 首次初始化后快很多。
+    exclude=(x,y,w,h) 时先把该屏幕区域涂白, 用于排除置顶小窗自身文字。"""
     try:
         import pyautogui
     except Exception as e:
         return None, "pyautogui 未安装: " + repr(e)
     try:
-        import easyocr
+        import easyocr  # noqa: F401  仅探测是否可用
+        reader = _get_ocr_reader()
     except Exception as e:
         return None, "OCR 不可用(需 pip install easyocr): " + repr(e)
     try:
-        reader = easyocr.Reader(["ch_sim", "en"], gpu=False)
         img = pyautogui.screenshot()
+        if exclude:
+            try:
+                from PIL import ImageDraw
+                x, y, w, h = exclude
+                ImageDraw.Draw(img).rectangle([x, y, x + w, y + h], fill="white")
+            except Exception:
+                pass
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ocr_tmp.png")
         img.save(path)
         res = reader.readtext(path, detail=1)
@@ -112,9 +133,99 @@ def find_by_ocr(target):
         return None, "OCR 执行出错: " + repr(e)
 
 
+def _template_candidates(target):
+    """返回 templates/ 里可能对应 target 的图片路径(精确名优先, 再子串匹配)。"""
+    t = (target or "").strip()
+    if not t or not os.path.isdir(TEMPLATES_DIR):
+        return []
+    try:
+        files = os.listdir(TEMPLATES_DIR)
+    except Exception:
+        return []
+    exact, fuzzy = [], []
+    for f in files:
+        stem = os.path.splitext(f)[0]
+        if not f.lower().endswith(".png"):
+            continue
+        if stem == t:
+            exact.append(os.path.join(TEMPLATES_DIR, f))
+        elif t in stem:
+            fuzzy.append(os.path.join(TEMPLATES_DIR, f))
+    seen, out = set(), []
+    for p in exact + fuzzy:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def find_by_template(target, confidence=0.75, retry_s=3.0):
+    """模板图像匹配(借鉴 waterRPA): 在 templates/ 找 target 对应小图, 全屏匹配后点中心。
+    轮询 retry_s 秒, 等目标出现再命中。返回 (pt, info) 或 (None, 原因)。"""
+    cands = _template_candidates(target)
+    if not cands:
+        return None, "无模板 '%s' (教学一次自动存 templates/)" % target
+    try:
+        import pyautogui
+    except Exception as e:
+        return None, "pyautogui 未安装: " + repr(e)
+    try:
+        import cv2  # noqa
+        has_cv2 = True
+    except Exception:
+        has_cv2 = False
+    deadline = time.time() + retry_s
+    last_err = None
+    while time.time() < deadline:
+        for img_path in cands:
+            try:
+                if has_cv2:
+                    loc = pyautogui.locateCenterOnScreen(img_path, confidence=confidence)
+                else:
+                    loc = pyautogui.locateCenterOnScreen(img_path)
+            except Exception as e:
+                last_err = e
+                loc = None
+            if loc is not None:
+                return (int(loc.x), int(loc.y)), "模板命中: " + os.path.basename(img_path)
+        time.sleep(0.1)
+    if last_err is not None:
+        return None, "模板匹配出错: " + repr(last_err)
+    return None, "模板未找到 '%s'" % target
+
+
+def save_template(target, abs_x, abs_y, size=120):
+    """教学态: 截取点击点周围 size×size 区域存为 templates/<target>.png, 供 find_by_template 复用。
+    返回模板路径, 失败返回 None。"""
+    try:
+        import pyautogui
+    except Exception:
+        return None
+    if not target:
+        return None
+    try:
+        os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    except Exception:
+        return None
+    safe = "".join(ch for ch in (target or "").strip() if ch not in '\\/:*?"<>|').strip()
+    if not safe:
+        safe = "tmpl_%d" % int(time.time())
+    half = size // 2
+    try:
+        img = pyautogui.screenshot(region=(int(abs_x - half), int(abs_y - half), size, size))
+        path = os.path.join(TEMPLATES_DIR, safe + ".png")
+        img.save(path)
+        return path
+    except Exception:
+        return None
+
+
 def locate(target):
-    """统一入口: 先控件树, 再 OCR 兜底。返回 (pt_or_None, info)。"""
+    """统一入口: 控件树 -> 模板匹配 -> OCR 兜底。返回 (pt_or_None, info)。"""
     pt, info = find_control(target)
+    if pt:
+        return pt, info
+    pt, info = find_by_template(target)
     if pt:
         return pt, info
     return find_by_ocr(target)
