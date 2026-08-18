@@ -9,5 +9,12 @@
   "cooldown_s": 1.0,
   "vad_engine": "silero",
   "wake_word": "",
-  "confirm_high_risk": false
+  "confirm_high_risk": false,
+  "tts": true,
+  "chat_enabled": true,
+  "asr_mode": "local",
+  "asr_server": "http://localhost:8000/v1",
+  "correction_dict": {},
+  "vl_base": "http://localhost:1235/v1",
+  "trainer": {"base": "", "key": "", "model": ""}
 }

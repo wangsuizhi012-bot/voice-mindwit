@@ -25,6 +25,41 @@
 | 按 F8 | 停止整个程序（安全兜底） |
 | 按 F9 | 停止录制宏并保存（不退出程序） |
 | 退出 | 停止 |
+| 聊天模式 / 退出聊天 | 开启/关闭多轮对话（非命令语音走本地大模型闲聊，可选 TTS 朗读） |
+| 清空对话 | 重置对话历史 |
+| 学习技能 发邮件 | 截取当前界面 → 本地视觉模型(:1235)推断步骤 → 存为技能（云端大模型可选） |
+| 录制技能 发邮件 | 手动演示：逐步说指令，说「完成」存为技能 |
+| 执行技能 发邮件 | 一句话重放整段技能（带二次确认） |
+| 列出技能 / 删除技能 X | 查看 / 删除已学技能 |
+
+## 新增功能（2026-08-18）：对话 / 技能 / 视觉点击
+
+针对「识别率低、打开慢、功能单一」三个痛点做了增强，**原有脚本录制（宏）功能完全保留**。
+
+### 1. 对话功能（多轮 + 可选 TTS）
+非命令类语音默认走本地大模型（:1234）做多轮闲聊，回复显示在置顶小窗，并可用 **Windows SAPI 朗读**（零依赖、全程本地，不需要任何云端 TTS）。
+- 说「聊天模式」开启 / 「退出聊天」关闭 / 「清空对话」清历史。
+- 想关掉朗读：config 设 `"tts": false`。
+
+### 2. 技能系统（截图→大模型→可重放的点击序列）
+复刻社区主流做法（参考 harvis 的 skills/ 目录、Personal-PC-Assistant 的 learned commands）：把一串操作固化成**命名技能**，下次一句话重放。
+- **学习技能 X**：截取当前界面 → 发给本地视觉模型 Qwen3-VL(:1235) → 推断在该界面上完成「X」所需的点击/输入步骤 → 存为技能。
+  - 视觉模型不可用时自动降级为**录制技能 X**（你手动演示一遍，说「完成」保存）。
+- **执行技能 X**：重放该技能（带二次确认，说「确认」执行）。
+- **列出技能 / 删除技能 X**：管理。
+- 技能文件存 `skills/<名字>.json`，步骤格式与宏完全同构（intent JSON），可直接手编。
+
+> 云端大模型训练（可选）：config 的 `trainer` 填 `base/key/model` 后，「学习技能」会改走云端多模态模型（更强，但走网络），留空则默认用本地 VL。
+
+### 3. 视觉点击兜底（本地显卡 + Python 低本方案）
+控件树/模板/OCR 都定位不到时（游戏、自绘 UI、无文字控件），新增 `click_visual` 动作：用本机 VL(:1235) 看截图，按「网格动作空间」（见 `E:/AI/knowledge/nuphus-desktop-automation`）只回答目标在哪一格，坐标纯算术得出 → 可复现、token 极省。说「点红色登录按钮」且控件树找不到时，大模型会返回 `click_visual` 兜底。
+
+### 4. 识别率 & 启动速度
+- **识别率**：SenseVoice-Small 在中文上本就优于 Whisper（CER 4.2% vs 5.8%），识别率低多半是 VAD 截断 / 麦克风 / GPU 未启用 / 领域词，而非模型。针对性做了：
+  - `asr_mode: "server"`：走常驻 `funasr-server`（OpenAI 兼容，默认 :8000），启动**零等待**且识别率一致 → 这是「打开快」的最佳解。先 `funasr-server --device cuda` 起服务即可。
+  - `correction_dict`：纠错词典 `{"误识别":"正确写法"}`，零成本逼近热词效果（SenseVoice 不支持热词）。
+  - 后台加载 ASR，启动即弹窗，不再干等模型。
+- **启动速度**：置顶小窗先弹，ASR 后台加载，首条指令自动等模型就绪；想秒开用上面的 server 模式。
 
 ## 环境要求
 
@@ -59,6 +94,13 @@ venv\Scripts\python.exe voice_assistant.py
 | `wake_word` | openWakeWord 唤醒词模型名（如 `hey_jarvis`）；留空=持续监听 | `""` |
 | `confirm_high_risk` | 高风险动作（发送/打字/打开/点击）执行前是否要语音二次确认 | `false` |
 | `cooldown_s` | 两次指令最小间隔 | `1.0` |
+| `tts` | 对话回复是否用 Windows SAPI 朗读 | `true` |
+| `chat_enabled` | 非命令语音是否走多轮对话 | `true` |
+| `asr_mode` | `local`(SenseVoice GPU) / `server`(funasr-server 秒开) | `local` |
+| `asr_server` | funasr-server 地址 | `http://localhost:8000/v1` |
+| `correction_dict` | 纠错词典：`{"误识别":"正确写法"}` | `{}` |
+| `vl_base` | 本地视觉模型(用于技能训练/视觉点击) | `http://localhost:1235/v1` |
+| `trainer` | 云端多模态(可选)：`{base,key,model}`，留空=用本地 VL | `{}` |
 
 模型路径：SenseVoice 走 ModelScope 缓存（`~/.cache/modelscope`），首次自动下载。
 
@@ -130,6 +172,12 @@ voice-assistant/
   inspect_foreground.py# 诊断：列出前台窗口所有带名字的控件
   shots/               # 截图输出
   run_assistant.log    # 运行日志
+  dialogue.py          # 对话模块：多轮闲聊 + TTS(Windows SAPI)
+  asr_better.py        # ASR 抽象层：local GPU / server + 纠错词典
+  skills.py            # 技能存储（复用 macro 步骤格式）
+  skill_trainer.py     # 截图→视觉模型→技能
+  visual_click.py      # 运行时视觉点击（网格动作空间）
+  skills/              # 已学技能（自动生成，可手编）
 ```
 
 ## 致谢（Acknowledgements）

@@ -5,8 +5,13 @@
 
 日志实时同时输出到: 控制台(GBK) + run_assistant.log(UTF-8) + 常驻置顶小窗(可选)。
 """
-import sys, os, json, time, queue, threading
+import sys, os, json, time, queue, threading, re
 import requests
+import asr_better          # ASR 抽象层(local GPU / server + 纠错词典)
+import dialogue            # 多轮对话 + TTS(Windows SAPI)
+import skills              # 技能存储(复用 macro 步骤格式)
+import skill_trainer       # 截图->视觉模型->技能
+import visual_click        # 运行时视觉点击(网格动作空间)
 
 # ---- 控制台/文件统一 UTF-8 (Windows 控制台默认即 UTF-8, PEP528) ----
 os.environ.setdefault("TQDM_DISABLE", "1")   # 关 FunASR 进度条噪声
@@ -36,7 +41,7 @@ CONFIG = {
     "screenshot_mode": "active_window",  # active_window | full | region
     "screenshot_region": None,             # [x,y,w,h] 当 mode=region
     "auto_send": False,           # 截图粘贴后是否自动按回车发送(默认关, 安全第一)
-    "hangover_s": 0.6,            # 末尾静音多久算一句话说完
+    "hangover_s": 0.8,            # 末尾静音多久算一句话说完(调大: 减少话说到一半被截断)
     "vad_aggressiveness": 3,
     "cooldown_s": 1.0,            # 两次指令最小间隔
     "confirm_high_risk": False,   # 高风险动作(发送/打字/打开/点击)执行前是否要语音二次确认
@@ -45,6 +50,13 @@ CONFIG = {
     "stop_hotkey": "f8",         # 全局热键停止整个程序(防自动化跑飞); 值: f8/f9/f10/f11/esc/f5
     "stop_recording_hotkey": "f9",  # 停止录制宏并保存(不退出程序); 值: f8/f9/f10/f11/esc/f5
     "ocr_fallback": False,       # OCR 兜底(默认关: 边聊天边用会误命中聊天窗口文字; 需要时设 true)
+    "tts": True,                 # 对话回复是否用 Windows SAPI 朗读(零依赖, 全程本地)
+    "chat_enabled": True,        # 非命令语音是否走多轮对话(关=原行为, none 不回复)
+    "asr_mode": "local",         # local(SenseVoice GPU) | server(funasr-server, 秒开)
+    "asr_server": "http://localhost:8000/v1",
+    "correction_dict": {},       # 纠错词典: {"误识别":"正确写法"} 低成本提升识别率
+    "vl_base": "http://localhost:1235/v1",   # 本地视觉模型(Qwen3-VL)用于技能训练/视觉点击
+    "trainer": {"base": "", "key": "", "model": ""},  # 云端多模态(可选, 留空=用本地VL)
 }
 
 def load_config():
@@ -103,25 +115,64 @@ def setup_logging():
 def log(m):
     print(m, flush=True)
 
-# ---- 常驻置顶小窗(实时显示识别/执行) ----
+# ---- 常驻置顶小窗(实时显示识别/执行 + 右上角模式色条) ----
 class Overlay:
+    # 模式 -> 顶部色条背景色(实心, 一眼可辨)
+    MODE_BAR = {
+        "listen":    "#9aa0a6",   # 灰 监听中
+        "thinking":  "#ffd54f",   # 黄 理解中
+        "command":   "#3ddc84",   # 绿 指令模式
+        "chat":      "#4aa3ff",   # 蓝 聊天模式
+        "recording": "#ffb020",   # 橙 录制宏
+        "skill":     "#c678dd",   # 紫 录制技能
+        "pending":   "#ff5c5c",   # 红 待确认
+    }
+    MODE_TEXT = {
+        "listen":    "● 监听中",
+        "thinking":  "● 理解中",
+        "command":   "● 指令模式",
+        "chat":      "● 聊天模式",
+        "recording": "● 录制宏",
+        "skill":     "● 录制技能",
+        "pending":   "● 待确认",
+    }
     def __init__(self):
         import tkinter as tk
         self.tk = tk
         self.root = tk.Tk()
         self.root.title("语音助手")
         self.root.attributes("-topmost", True)
+        # 定位右上角(top-right)
         try:
-            self.root.geometry("580x150+12+12")
+            import pyautogui
+            sw, sh = pyautogui.size()
+        except Exception:
+            sw, sh = 1920, 1080
+        w, h = 420, 150
+        x = max(12, sw - w - 12)
+        y = 12
+        self.rect = (x, y, w, h)   # 小窗屏幕位置, 供 OCR 排除该区域(不关窗)
+        try:
+            self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
         except Exception:
             pass
-        self.rect = (12, 12, 580, 150)   # 小窗屏幕位置, 供 OCR 排除该区域(不关窗)
+        self.root.configure(bg="#1e1e2e")
+        # 顶部实心模式色条(整条变色, 黑字, 绝不漏看)
+        self.bar = tk.Frame(self.root, bg="#9aa0a6", height=28)
+        self.bar.pack(side="top", fill="x")
+        self.bar.pack_propagate(False)
+        self.bar_label = tk.Label(self.bar, text="● 监听中",
+                                  bg="#9aa0a6", fg="#111111",
+                                  font=("Microsoft YaHei UI", 12, "bold"),
+                                  anchor="center")
+        self.bar_label.pack(fill="both", expand=True)
+        # 主内容
         self.var = tk.StringVar(value="监听中…\n（说 退出 停止）")
         self.label = tk.Label(self.root, textvariable=self.var,
-                              font=("Microsoft YaHei UI", 12), wraplength=555,
+                              font=("Microsoft YaHei UI", 12), wraplength=w-24,
                               justify="left", anchor="nw",
                               bg="#1e1e2e", fg="#e6e6e6")
-        self.label.pack(fill="both", expand=True, padx=12, pady=12)
+        self.label.pack(fill="both", expand=True, padx=12, pady=8)
         self.root.update()
     def _apply(self, text):
         try:
@@ -129,9 +180,25 @@ class Overlay:
             self.root.update_idletasks()
         except Exception:
             pass
+    def _apply_mode(self, mode, detail):
+        try:
+            bg = self.MODE_BAR.get(mode, self.MODE_BAR["listen"])
+            text = self.MODE_TEXT.get(mode, "● 监听中")
+            full = text + ((" · " + detail) if detail else "")
+            self.bar.configure(bg=bg)
+            self.bar_label.configure(bg=bg, text=full)
+            self.root.update_idletasks()
+        except Exception:
+            pass
     def set(self, text):
         try:
             self.root.after(0, self._apply, text)
+        except Exception:
+            pass
+    def set_mode(self, mode, detail=""):
+        """更新右上角模式色条(线程安全)。"""
+        try:
+            self.root.after(0, self._apply_mode, mode, detail)
         except Exception:
             pass
     def run(self):
@@ -141,6 +208,27 @@ class Overlay:
             pass
 
 OVN = None
+
+# ---- 新功能全局状态 ----
+_asr = None
+_asr_corr = {}
+_asr_mode = "local"
+_dialogue = None
+_skill_recording = None     # 录制技能态: 非 None 时逐条记录意图, 说"完成"存为技能
+
+# ---- 模式状态机(右上角状态栏) ----
+# listen=监听中 thinking=理解中 command=指令 chat=聊天 recording=录制宏 skill=录制技能 pending=待确认
+MODE = "listen"
+_tts_until = 0.0   # TTS 播放期间的静音屏蔽窗口(避免助手听到自己声音触发空识别)
+def set_mode(m, detail=""):
+    """切换当前模式并更新右上角状态栏(线程安全)。"""
+    global MODE
+    MODE = m
+    if OVN is not None:
+        try:
+            OVN.set_mode(m, detail)
+        except Exception:
+            pass
 
 # ---- 麦克风选择(复用已验证逻辑) ----
 def choose_mic():
@@ -160,24 +248,39 @@ def choose_mic():
     log("使用输入设备 [%d] %s" % (chosen, devices[chosen].get("name")))
     return chosen
 
-# ---- ASR (SenseVoice) ----
-_asr_model = None
-def load_asr():
-    global _asr_model
-    import torch
-    from funasr import AutoModel
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    log("加载 SenseVoice 模型中(首次会从缓存读取) 设备=%s ..." % device)
-    _asr_model = AutoModel(model="iic/SenseVoiceSmall", vad_model="fsmn-vad",
-                           device=device, disable_update=True)
-    log("ASR 模型就绪")
+# ---- ASR (抽象层: local GPU / server, 见 asr_better.py) ----
+def build_asr_backend():
+    """构建 ASR 后端。local 模式后台加载模型(不阻塞 UI); server 模式立即可用。"""
+    global _asr, _asr_corr, _asr_mode
+    _asr, _asr_corr, _asr_mode = asr_better.build_asr(CONFIG)
+    if _asr_mode == "local":
+        def _load():
+            try:
+                _asr.load()
+                log("ASR 模型就绪(GPU)")
+            except Exception as e:
+                log("ASR 加载失败: " + repr(e))
+        threading.Thread(target=_load, daemon=True).start()
+    else:
+        log("ASR 后端: server (" + str(CONFIG.get("asr_server", "")) + ") 立即可用")
+
+def ensure_asr_ready(timeout=120):
+    if _asr is None:
+        return False
+    if _asr.ready():
+        return True
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if _asr.ready():
+            return True
+        time.sleep(0.3)
+    return _asr.ready()
 
 def transcribe(int16_audio):
-    from funasr.utils.postprocess_utils import rich_transcription_postprocess
-    import numpy as np
-    a = int16_audio.flatten().astype("float32") / 32768.0
-    res = _asr_model.generate(input=a, language="auto", use_itn=True)
-    return rich_transcription_postprocess(res[0]["text"])
+    if _asr is None:
+        return ""
+    text = _asr.transcribe(int16_audio)
+    return asr_better.apply_correction(text, _asr_corr)
 
 # ---- LLM 意图 ----
 _MODEL_ID = None
@@ -206,11 +309,12 @@ SYS_PROMPT = """你是一个本地语音助手的中文意图解析器。用户�
 - "click_here": 在鼠标当前所在位置点击。**仅当用户只说"点一下/点这里/按一下"这类话、后面没有任何目标文字时**才用。params:{"button":"left","clicks":1}  (button 可 left/right, clicks 可 1 或 2 表示双击)
 - "click_target": 点击屏幕上指定的控件(按钮/输入框/菜单项等), 系统会自动在前台窗口里找到它并移动鼠标点击, 用户无需移动鼠标。**只要用户说"点/点击/按"后面跟了具体目标文字(如"点发送""点击一下默认权限""点确定按钮""点搜索"), 就必须用 click_target**, 让系统自己移动鼠标去找。params:{"target":"控件上的文字, 如 发送/确定/设置/搜索","hover":false}  当用户说"悬停/移到/放到 xxx 上"(只移动鼠标不点击)时 hover 填 true
 - "click": 点击屏幕精确坐标(仅当用户明确说出坐标数字如"点 100 200"时才用, 否则绝不用)。params:{"x":0,"y":0}
+- "click_visual": 当控件树/记忆库/模板/OCR 都定位不到目标, 但界面上肉眼能看到该元素(如游戏按钮/图片按钮/无文字控件)时, 用本地视觉模型看截图点它。params:{"target":"对目标的文字描述, 如 红色登录按钮/左下角开始"}。仅作 click_target 失败后的兜底。
 - "press": 按键或热键。单键用 params:{"key":"enter"} (key 可为 enter/space/f5/esc/backspace/delete/home/end/up/down/left/right/tab 等); 组合键用 params:{"keys":["ctrl","s"]} (ctrl/alt/shift + 字母或功能键)。常见: "保存"->ctrl+s, "复制"->ctrl+c, "粘贴"->ctrl+v, "全选"->ctrl+a, "刷新"->f5, "回车/确认/发送"->enter
 - "scroll": 滚动鼠标滚轮。params:{"amount":3} 正数向上滚、负数向下滚。当用户说"往下滚/向上滚/往下翻/往上翻/滚动页面/滚轮"时用
 - "none": 闲聊或无需操作。params:{}
 返回格式: {"action":"...","params":{...},"reply":"一句话回复(中文,可选)"}
-如果是命令类(截图/打开/打字/点击/按键/发送)务必返回对应 action；普通聊天返回 none。口语映射: 只"点一下/点这里/按一下"(无目标文字)->click_here; "点/点击 + 具体目标文字"(如"点发送""点击一下默认权限")->click_target; "双击"->click_here{clicks:2}; "右键"->click_here{button:right}; "回车/确认"->press{key:enter}; "保存/复制/粘贴/全选/刷新/撤销/剪切"->对应热键 press。
+如果是命令类(截图/打开/打字/点击/按键/发送)务必返回对应 action；普通聊天返回 none。口语映射: 只"点一下/点这里/按一下"(无目标文字)->click_here; "点/点击 + 具体目标文字"(如"点发送""点击一下默认权限")->click_target; "双击"->click_here{clicks:2}; "右键"->click_here{button:right}; "回车/确认"->press{key:enter}; "保存/复制/粘贴/全选/刷新/撤销/剪切"->对应热键 press; 若 click_target 找不到且能描述目标外观, 用 click_visual{target:"描述"} 兜底。
 重要: 用户说"复制/粘贴/剪切/全选/保存/刷新/撤销"指的是键盘快捷键操作, 必须返回 press 动作(对应 ctrl+c / ctrl+v / ctrl+x / ctrl+a / ctrl+s / f5 / ctrl+z), 绝不要返回 type 或 none。用户说"点xxx/点击xxx/点一下xxx/按一下xxx按钮"(带具体目标文字)指的是点击某个界面元素, 必须返回 click_target{target:"xxx"}让鼠标自己移动去找; 只有当用户只说"点一下/点这里/按一下"(完全没有目标文字)时才返回 click_here。"""
 
 def parse_json(text):
@@ -463,13 +567,21 @@ def press_key(key=None, keys=None):
     else:
         log("  按键参数为空, 跳过")
 
-STOP_WORDS = ["退出", "停止", "别动", "关闭助手", "结束", "quit", "stop"]
+STOP_WORDS = ["停止", "别动", "关闭助手", "结束", "quit", "stop", "退出助手", "退出程序"]
+# 精确判定是否真要退出整个程序: 区分「退出」(退出助手) 与 「退出X」(关闭某应用, 不退出程序)
+_STOP_RE = re.compile(r"^(退出|停止|结束)(吧|了|哦|么|啊)?$")
+def is_stop_command(text):
+    """裸『退出/停止/结束』或带语气词(退出吧/退出了)才退程序；『退出记事本/退出微信』视为关应用, 不退。"""
+    t = (text or "").strip().strip("。.，,!！?？、 ").lower()
+    if t in ("退出", "停止", "结束", "quit", "stop", "关闭助手", "退出助手", "退出程序", "别动"):
+        return True
+    return bool(_STOP_RE.match(t))
 CONFIRM_WORDS = ["确认", "确定", "对", "是的", "执行", "好", "yes", "ok"]
 CANCEL_WORDS = ["取消", "不", "算了", "别", "no", "cancel"]
 
 # ---- 安全层: 动作白名单 + JSON 校验 + 高风险确认 ----
 ALLOWED_ACTIONS = {"screenshot", "screenshot_send", "type", "open",
-                   "click", "click_here", "click_target", "press", "scroll", "none"}
+                   "click", "click_here", "click_target", "click_visual", "press", "scroll", "none"}
 HIGH_RISK_ACTIONS = {"screenshot_send", "type", "open", "click", "click_target"}
 _pending = {"intent": None}
 _teach_pending = None   # 教学态: click_target 失败时, 等用户手动点一下记进记忆库
@@ -504,6 +616,8 @@ def validate_intent(intent):
             int(params.get("x")); int(params.get("y"))
         except Exception:
             return False, "click 坐标非法"
+    if action == "click_visual" and not isinstance(params.get("target"), str):
+        return False, "click_visual 缺 target"
     return True, ""
 
 def _ensure_webrtcvad():
@@ -538,15 +652,16 @@ def _ensure_webrtcvad():
         log("  webrtcvad 自动修复失败: " + repr(ex))
 
 def execute(intent, raw_text):
-    low = (raw_text or "").lower()
-    for w in STOP_WORDS:
-        if w in low:
-            log("收到停止指令, 退出中...")
-            if OVN:
-                OVN.set("已停止。\n关闭黑窗口或按任意键退出。")
-            global RUNNING
-            RUNNING = False
-            return
+    action = intent.get("action")
+    if action and action != "none":
+        set_mode("command", str(action))   # 右上角状态: 指令模式·动作
+    if is_stop_command(raw_text):
+        log("收到停止指令, 退出中...")
+        if OVN:
+            OVN.set("已停止。\n关闭黑窗口或按任意键退出。")
+        global RUNNING
+        RUNNING = False
+        return
     action = intent.get("action")
     params = intent.get("params", {}) or {}
     log("执行：" + str(action))
@@ -568,6 +683,12 @@ def execute(intent, raw_text):
                        clicks=int(params.get("clicks", 1)))
         elif action == "click_target":
             click_target(params.get("target", ""), hover=bool(params.get("hover")))
+        elif action == "click_visual":
+            try:
+                visual_click.click_visual(params.get("target", ""),
+                                         vl_base=CONFIG.get("vl_base"))
+            except Exception as e:
+                log("  视觉点击失败: " + repr(e))
         elif action == "scroll":
             import pyautogui
             amt = int(params.get("amount", 3))
@@ -619,10 +740,12 @@ def _handle_macro(text):
         if any(w in text for w in ("停止", "结束", "保存", "完成")):
             name = _extract_after(text, ("停止", "结束", "保存", "完成"))
             _stop_record(name)
+            set_mode("listen")   # 录制结束 -> 回到监听
             return True
     # 开始录制: 不在录制中时, 只要含"录制/记录/录屏"即触发
     if _recording is None and any(w in text for w in ("录制", "记录", "录屏")):
         _start_record()
+        set_mode("recording")   # 右上角状态: 录制宏
         return True
     # 重放流程
     for kw in ("执行流程", "运行流程", "跑流程", "重放", "执行宏", "运行宏"):
@@ -631,6 +754,133 @@ def _handle_macro(text):
             _run_flow(name)
             return True
     return False
+
+
+# ---- 技能指令(截图训练 / 录制 / 执行 / 列出 / 删除 / 聊天开关) ----
+def _handle_skill(text):
+    """处理技能相关指令, 返回 True 表示已吞掉不再走 LLM。"""
+    global _skill_recording, _dialogue
+    # 录制技能中: 停止保存
+    if _skill_recording is not None:
+        if any(w in text for w in ("停止", "结束", "保存", "完成")):
+            _stop_skill_record()
+            set_mode("listen")   # 录制结束 -> 回到监听
+            return True
+        return True   # 录制中吞掉, 不进 LLM
+    # 聊天开关 / 对话历史
+    if any(k in text for k in ("聊天模式", "开始聊天", "进入聊天", "打开聊天")):
+        CONFIG["chat_enabled"] = True
+        log("  进入聊天模式"); 
+        set_mode("chat")   # 右上角状态: 聊天模式(语音切换)
+        if OVN: OVN.set("已进入聊天模式\n随便聊，说「退出聊天」结束")
+        return True
+    if any(k in text for k in ("退出聊天", "关闭聊天", "别聊了", "停止聊天")):
+        CONFIG["chat_enabled"] = False
+        log("  退出聊天模式"); 
+        set_mode("command")   # 回到指令/自动识别态
+        if OVN: OVN.set("已退出聊天模式")
+        return True
+    if any(k in text for k in ("清空对话", "忘记对话", "重置对话", "清除对话")):
+        if _dialogue: _dialogue.reset()
+        log("  已清空对话历史"); 
+        if OVN: OVN.set("已清空对话历史")
+        return True
+    # 列出技能
+    if any(k in text for k in ("列出技能", "有哪些技能", "技能列表", "看看技能", "技能有哪些")):
+        _list_skills(); return True
+    # 删除技能
+    for kw in ("删除技能", "删掉技能", "移除技能", "去掉技能"):
+        if kw in text:
+            _delete_skill(_extract_after(text, (kw,))); return True
+    # 执行技能
+    for kw in ("执行技能", "运行技能", "用技能", "跑技能", "施展技能"):
+        if kw in text:
+            _run_skill(_extract_after(text, (kw,))); return True
+    # 学习/训练技能(截图 -> 视觉模型)
+    for kw in ("学习技能", "训练技能", "教技能", "学会技能"):
+        if kw in text:
+            _learn_skill(_extract_after(text, (kw,))); return True
+    # 录制技能(手动演示)
+    for kw in ("录制技能", "记录技能", "录个技能", "录技能", "手动技能"):
+        if kw in text:
+            _start_skill_record(_extract_after(text, (kw,)))
+            set_mode("skill")   # 右上角状态: 录制技能
+            return True
+    return False
+
+
+def _learn_skill(name):
+    if not name:
+        name = "skill_%d" % (len(skills.list_skills()) + 1)
+    log("  ▶ 学习技能「%s」: 截取当前界面并发给视觉模型..." % name)
+    if OVN: OVN.set("正在看屏幕学习「%s」…" % name)
+    steps = skill_trainer.train_skill(name, task=name, region=None, cfg=CONFIG)
+    if steps:
+        path = skills.save_skill(name, steps, triggers=[name], source="trained")
+        log("  ✅ 已用视觉训练技能「%s」共 %d 步 -> %s" % (name, len(steps), path))
+        if OVN: OVN.set("已学会「%s」\n共 %d 步，说「执行技能%s」重放" % (name, len(steps), name))
+    else:
+        log("  视觉训练失败, 改为手动演示: 逐步说指令, 说「完成」保存")
+        if OVN: OVN.set("视觉不可用，请手动演示\n逐步说指令，说「完成」保存")
+        _start_skill_record(name)
+
+
+def _start_skill_record(name):
+    global _skill_recording
+    _skill_recording = {"name": name or "", "steps": []}
+    log("  ▶ 录制技能: 逐步说指令; 说「完成」保存")
+    if OVN: OVN.set("录制技能中…\n逐步说指令，说「完成」保存")
+
+
+def _stop_skill_record():
+    global _skill_recording
+    steps = (_skill_recording or {}).get("steps", []) if _skill_recording else []
+    name = (_skill_recording or {}).get("name", "")
+    _skill_recording = None
+    if not steps:
+        log("  录制为空，未保存")
+        if OVN: OVN.set("录制为空，未保存")
+        return
+    nm = name or ("skill_%d" % (len(skills.list_skills()) + 1))
+    path = skills.save_skill(nm, steps, triggers=[nm], source="manual")
+    log("  ✅ 已保存技能「%s」共 %d 步 -> %s" % (nm, len(steps), path))
+    if OVN: OVN.set("已保存技能「%s」\n共 %d 步，说「执行技能%s」重放" % (nm, len(steps), nm))
+
+
+def _run_skill(name):
+    sk = skills.load_skill(name) if name else None
+    if not sk:
+        sk = skills.match_skill(name or "")
+    if not sk:
+        avail = "、".join(skills.list_skills()) or "（暂无）"
+        log("  找不到技能「%s」，已有: %s" % (name, avail))
+        if OVN: OVN.set("找不到技能「%s」\n已有：%s" % (name, avail))
+        return
+    steps = sk.get("steps", [])
+    global _pending_flow
+    _pending_flow = steps
+    set_mode("pending", "执行技能确认")   # 右上角状态: 待确认
+    log("  [待确认] 执行技能「%s」共 %d 步？说 确认 或 取消" % (sk.get("name", name), len(steps)))
+    if OVN: OVN.set("执行技能「%s」共 %d 步？\n说 确认 或 取消" % (sk.get("name", name), len(steps)))
+
+
+def _list_skills():
+    ls = skills.list_skills()
+    if not ls:
+        log("  还没有技能，说「学习技能 X」或「录制技能 X」创建")
+        if OVN: OVN.set("还没有技能\n说「学习技能 X」创建")
+        return
+    log("  已有技能: " + "、".join(ls))
+    if OVN: OVN.set("已有技能:\n" + "\n".join("· " + n for n in ls))
+
+
+def _delete_skill(name):
+    if skills.delete_skill(name):
+        log("  已删除技能「%s」" % name)
+        if OVN: OVN.set("已删除技能「%s」" % name)
+    else:
+        log("  没找到技能「%s」" % name)
+        if OVN: OVN.set("没找到技能「%s」" % name)
 
 def _start_record():
     global _recording
@@ -675,6 +925,7 @@ def _run_flow(name):
         return
     steps = data.get("steps", [])
     _pending_flow = steps
+    set_mode("pending", "执行流程确认")   # 右上角状态: 待确认
     log("  [待确认] 执行流程「%s」共 %d 步？说 确认 或 取消" % (data.get("name", name), len(steps)))
     if OVN:
         OVN.set("执行流程「%s」共 %d 步？\n说 确认 或 取消" % (data.get("name", name), len(steps)))
@@ -719,7 +970,7 @@ class Listener:
                 from silero_vad import load_silero_vad, VADIterator
                 self._silero_model = load_silero_vad()
                 ms = int(float(CONFIG.get("hangover_s", 0.6)) * 1000)
-                self._silero = VADIterator(self._silero_model, threshold=0.5,
+                self._silero = VADIterator(self._silero_model, threshold=0.4,
                                            sampling_rate=SAMPLE_RATE,
                                            min_silence_duration_ms=ms,
                                            speech_pad_ms=300)
@@ -834,7 +1085,8 @@ class Listener:
 
     def _feed_silero(self, data):
         import numpy as np, torch, time as _t
-        a = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        # 必须归一化到 [-1,1], 否则 VAD 能量放大 ~1000 倍, 端点/语音判定全乱(没说完就识别/识别不准)
+        a = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
         x = torch.from_numpy(a)
         try:
             out = self._silero(x, return_seconds=False)
@@ -875,35 +1127,47 @@ class Listener:
         on_segment(audio)
 
 def on_segment(audio):
-    global _pending_flow
+    global _pending_flow, _tts_until
+    # TTS 播放期间屏蔽麦克风回采(助手说话时麦克风会录到自己的声音)
+    if time.time() < _tts_until:
+        return
+    if not ensure_asr_ready():
+        log("  ASR 未就绪, 跳过本条")
+        return
     text = transcribe(audio)
     if not text or not text.strip():
         return
+    shown = text.rstrip("。.，,!！?？ ").strip()   # 去掉 SenseVoice 正常句末标点, 纯展示用
     log("")
-    log("──────── 听到：" + text)
+    log("──────── 听到：" + shown)
     if OVN:
-        OVN.set("听到：" + text + "\n（理解中…）")
+        OVN.set("听到：" + shown + "\n（理解中…）")
+    set_mode("thinking")   # 右上角状态: 理解中
     # 录制宏 meta 指令(优先, 避免"停止录制"被 STOP_WORDS 的"停止"误判退出)
     if _handle_macro(text):
         return
-    # 停止词(最高优先级)
-    low = text.lower()
-    if any(w in low for w in STOP_WORDS):
+    # 技能指令(学习/执行/录制/列出/删除/聊天开关)
+    if _handle_skill(text):
+        return
+    # 停止词(最高优先级): 仅裸『退出/停止』或『退出助手/退出程序』才退, 『退出记事本』等不算
+    if is_stop_command(text):
         log("收到停止指令, 退出中...")
         global RUNNING
         RUNNING = False
         return
-    # 待确认状态: 流程重放确认(优先)
+    # 待确认状态: 流程/技能重放确认(优先)
     if _pending_flow is not None:
+        set_mode("pending", "执行确认")   # 右上角状态: 待确认
         if any(w in text for w in CONFIRM_WORDS):
             steps = _pending_flow
             _pending_flow = None
-            log("  确认执行流程")
+            log("  确认执行流程/技能")
             _execute_flow(steps)
             return
         if any(w in text for w in CANCEL_WORDS):
-            log("  已取消流程执行")
+            log("  已取消流程/技能执行")
             _pending_flow = None
+            set_mode("listen")
             return
     # 待确认状态: 上一条高风险指令等着你确认
     if _pending["intent"] is not None:
@@ -927,15 +1191,38 @@ def on_segment(audio):
         if OVN:
             OVN.set("拒绝：" + reason)
         return
-    # 录制态: 把这条有效指令记进当前流程
     action = intent.get("action")
+    # 录制态: 把这条有效指令记进当前流程 / 技能
     if _recording is not None and action != "none":
         _recording["steps"].append(intent)
         log("  [录制 %d] %s %s" % (len(_recording["steps"]), action,
                                    json.dumps(intent.get("params", {}), ensure_ascii=False)))
+    if _skill_recording is not None and action != "none":
+        _skill_recording["steps"].append(intent)
+        log("  [技能录制 %d] %s %s" % (len(_skill_recording["steps"]), action,
+                                       json.dumps(intent.get("params", {}), ensure_ascii=False)))
+    # 对话路由: 非命令语音 -> 多轮对话(可选 TTS)
+    if action == "none":
+        if _dialogue is not None and CONFIG.get("chat_enabled", True) and len(text.strip()) > 1:
+            reply = _dialogue.ask(text)
+            log("助手: " + reply)
+            set_mode("chat")   # 右上角状态: 聊天模式
+            if OVN:
+                OVN.set("助手：" + reply)
+            # 粗略估计朗读时长, 期间屏蔽麦克风, 避免助手听到自己声音又识别
+            _tts_until = time.time() + max(2.0, len(reply) * 0.22)
+            _dialogue.speak(reply)
+            return
+        if intent.get("reply"):
+            log("助手: " + intent.get("reply"))
+            set_mode("chat")   # 右上角状态: 聊天模式(无对话模块时仍按闲聊显示)
+            if OVN:
+                OVN.set("助手：" + intent.get("reply"))
+        return
     # 高风险动作二次确认(可选)
     if CONFIG.get("confirm_high_risk") and action in HIGH_RISK_ACTIONS:
         _pending["intent"] = intent
+        set_mode("pending", str(action))   # 右上角状态: 待确认
         msg = "确认 " + str(action) + " 吗？说 确认 或 取消"
         log("  [待确认] " + msg)
         if OVN:
@@ -993,15 +1280,23 @@ def main():
         except Exception:
             pass
     setup_logging()
-    # 置顶小窗(可选, 失败也不影响主功能)
+    # 置顶小窗(可选, 失败也不影响主功能) —— 先弹窗, 感知启动更快
     try:
         OVN = Overlay()
         threading.Thread(target=OVN.run, daemon=True).start()
     except Exception as e:
         log("置顶窗不可用(仅控制台输出): " + repr(e))
         OVN = None
-    load_asr()
+    if OVN:
+        OVN.set("启动中…\n（模型后台加载，稍候即可说话）")
+    # ASR 后端(后台加载, 不阻塞 UI; 若 config.asr_mode=server 则立即可用)
+    build_asr_backend()
     detect_model()
+    # 对话模块(多轮 + 可选 TTS)
+    global _dialogue
+    _dialogue = dialogue.Dialogue(CONFIG["llm_base"], model_id=_MODEL_ID,
+                                 tts_enabled=CONFIG.get("tts", True))
+    log("对话模块就绪" + ("" if CONFIG.get("tts", True) else "（TTS 关闭）"))
     device = choose_mic()
     lis = Listener(device)
     threading.Thread(target=stop_hotkey_watcher, daemon=True).start()
