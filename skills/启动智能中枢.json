@@ -1,0 +1,19 @@
+{
+  "name": "启动智能中枢",
+  "triggers": [
+    "启动智能中枢",
+    "启动中枢",
+    "启动agenthub"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "智能中枢"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；agent-hub 全栈自动拉起（含掉线自愈）",
+  "created": "2026-09-01 14:21:09"
+}

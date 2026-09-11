@@ -7,6 +7,9 @@ flows/
 *.log
 *.png
 click_memory.json
+state/
+logs/
+*.wav
 
 # 内部文件，不进公开仓库
 交接.md

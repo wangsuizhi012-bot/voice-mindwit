@@ -1,0 +1,19 @@
+{
+  "name": "启动DSH",
+  "triggers": [
+    "启动dsh",
+    "打开DSH",
+    "启动桌宠"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "DSH"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；DeepSeek Harness @:3080",
+  "created": "2026-09-01 14:21:09"
+}

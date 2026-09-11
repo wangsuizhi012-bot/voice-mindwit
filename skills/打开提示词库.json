@@ -1,0 +1,18 @@
+{
+  "name": "打开提示词库",
+  "triggers": [
+    "打开提示词库",
+    "提示词库"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "E:\\AI\\prompt-kb"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；资源管理器打开 E:\\AI\\prompt-kb",
+  "created": "2026-09-01 14:21:09"
+}

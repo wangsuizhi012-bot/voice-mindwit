@@ -1,0 +1,19 @@
+{
+  "name": "打开图库",
+  "triggers": [
+    "打开图库",
+    "我的图库",
+    "看图库"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "http://127.0.0.1:8765"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；booru-tagger Web 图墙 :8765",
+  "created": "2026-09-01 14:21:09"
+}

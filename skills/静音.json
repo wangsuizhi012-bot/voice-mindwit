@@ -1,0 +1,19 @@
+{
+  "name": "静音",
+  "triggers": [
+    "静音",
+    "取消声音",
+    "闭麦声音"
+  ],
+  "steps": [
+    {
+      "action": "press",
+      "params": {
+        "key": "volumemute"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；切换静音/恢复（系统同一键）",
+  "created": "2026-09-01 14:21:09"
+}

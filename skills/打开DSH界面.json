@@ -1,0 +1,18 @@
+{
+  "name": "打开DSH界面",
+  "triggers": [
+    "打开dsh界面",
+    "dsh聊天"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "http://127.0.0.1:3080"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；DeepSeek Harness 网页 :3080",
+  "created": "2026-09-01 14:21:09"
+}

@@ -1,0 +1,31 @@
+{
+  "name": "服务状态",
+  "triggers": [
+    "服务状态",
+    "服务都活着吗",
+    "检查服务"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "终端"
+      }
+    },
+    {
+      "action": "type",
+      "params": {
+        "text": "python E:\\AI\\agent-hub\\agent_ctl.py status"
+      }
+    },
+    {
+      "action": "press",
+      "params": {
+        "key": "enter"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；新开终端跑 agent_ctl status；若粘贴没进输入框，点一下窗口再说一遍",
+  "created": "2026-09-01 14:21:09"
+}

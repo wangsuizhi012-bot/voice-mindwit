@@ -1,0 +1,19 @@
+{
+  "name": "启动视觉模型",
+  "triggers": [
+    "启动视觉模型",
+    "启动vl",
+    "开1235"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "视觉模型"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；Qwen3-VL @1235（已带 --mmproj-offload）；生图前先关闭它",
+  "created": "2026-09-01 14:21:09"
+}

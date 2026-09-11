@@ -1,0 +1,19 @@
+{
+  "name": "速记",
+  "triggers": [
+    "速记",
+    "记一笔",
+    "打开记事本"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "notepad"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；开记事本，配合「输入 xxx」可直接打字",
+  "created": "2026-09-01 14:21:09"
+}

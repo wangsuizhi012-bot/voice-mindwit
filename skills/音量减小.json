@@ -1,0 +1,20 @@
+{
+  "name": "音量减小",
+  "triggers": [
+    "音量减小",
+    "声音小点",
+    "音量小点",
+    "调小音量"
+  ],
+  "steps": [
+    {
+      "action": "press",
+      "params": {
+        "key": "volumedown"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；按一次音量-",
+  "created": "2026-09-01 14:21:09"
+}

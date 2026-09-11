@@ -1,0 +1,19 @@
+{
+  "name": "打开微信",
+  "triggers": [
+    "打开微信",
+    "我要微信",
+    "启动微信"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "微信"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；经系统 ShellExecute 解析启动",
+  "created": "2026-09-01 14:21:09"
+}

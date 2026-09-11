@@ -13,8 +13,19 @@
   "tts": true,
   "chat_enabled": true,
   "asr_mode": "local",
+  "asr_model": "iic/SenseVoiceSmall",
   "asr_server": "http://localhost:8000/v1",
-  "correction_dict": {},
+  "correction_dict": {
+    "comefi ui": "comfyui",
+    "commfy ui": "comfyui",
+    "commfyui": "comfyui",
+    "comefiui": "comfyui",
+    "comfy ui": "comfyui",
+    "康福有爱": "comfyui",
+    "康福UI": "comfyui",
+    "服务站": "服务栈",
+    "工作站": "服务栈"
+  },
   "vl_base": "http://localhost:1235/v1",
   "trainer": {"base": "", "key": "", "model": ""}
 }

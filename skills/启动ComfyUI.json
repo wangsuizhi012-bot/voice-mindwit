@@ -1,0 +1,23 @@
+{
+  "name": "启动ComfyUI",
+  "triggers": [
+    "ai绘画",
+    "ai画图",
+    "ai画画",
+    "启动comfyui",
+    "打开comfyui",
+    "绘画",
+    "画画"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "ComfyUI"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；Comfy Desktop（D 盘主实例）；**生图前先关 1234/1235**（8G 显存铁律）；主口令=AI绘画（ComfyUI 英文易误识，已配纠错词典）",
+  "created": "2026-09-01 14:21:09"
+}

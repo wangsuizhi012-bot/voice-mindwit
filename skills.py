@@ -98,13 +98,16 @@ def delete_skill(name):
 
 
 def match_skill(text):
-    """按触发词/名称匹配技能, 命中返回技能 dict, 否则 None。"""
+    """按触发词/名称匹配技能, 命中返回技能 dict, 否则 None。
+    多个技能的触发词都能命中时, 取**最长触发词**的那个(更具体的口令优先,
+    例如「打开comfyui界面」应命中「打开ComfyUI界面」而非「启动ComfyUI」)。"""
     text = (text or "").lower()
+    best, best_len = None, 0
     for name in list_skills():
         sk = load_skill(name)
         if not sk:
             continue
         for t in (sk.get("triggers") or [sk.get("name", "")]):
-            if t and t.lower() in text:
-                return sk
-    return None
+            if t and t.lower() in text and len(t) > best_len:
+                best, best_len = sk, len(t)
+    return best

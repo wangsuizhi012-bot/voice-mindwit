@@ -447,6 +447,17 @@ def type_text(t):
 APP_MAP = {
     "记事本": "notepad", "计算器": "calc", "画图": "mspaint",
     "资源管理器": "explorer", "浏览器": "explorer", "终端": "cmd", "cmd": "cmd",
+    # ---- 预置技能启动项(2026-08-30): 绝对路径防解析失败; bat/cmd 由 start 拉起新控制台 ----
+    "微信": r"C:\Program Files\Tencent\Weixin\Weixin.exe",
+    "哔哩哔哩": r"C:\Program Files\bilibili\哔哩哔哩.exe",
+    "obsidian": r"E:\AI\_apps\Obsidian\Obsidian\Obsidian.exe",
+    "ComfyUI": r"D:\AIPAINT\Comfy Desktop\Comfy Desktop.exe",
+    "本地大模型": r"E:\AI\_scripts\start-llama-server.bat",
+    "视觉模型": r"E:\AI\_scripts\start-vl-server.bat",
+    "服务栈": r"E:\AI\_scripts\start-stack.bat",
+    "智能中枢": r"E:\AI\agent-hub\start-agent-hub.bat",
+    "DSH": r"E:\AI\start_dsh.cmd",
+    "桌面识别": r"E:\AI\_scripts\start-uitars-server.bat",
 }
 def open_app(name):
     if not name:
@@ -1149,6 +1160,18 @@ def on_segment(audio):
     # 技能指令(学习/执行/录制/列出/删除/聊天开关)
     if _handle_skill(text):
         return
+    # 技能快触发(借鉴 harvis 的 skills-first 路由): 短口令直接命中技能触发词, 免说"执行技能"前缀。
+    # 仅限 ≤12 字的短句 + 触发词子串命中, 长句/聊天仍走 LLM 意图解析, 防误触; 执行仍需确认, 与「执行技能 X」同流程。
+    if len(text) <= 12:
+        _qsk = skills.match_skill(text)
+        if _qsk and _qsk.get("steps"):
+            log("  [快触发] 命中技能「%s」" % _qsk.get("name", ""))
+            global _pending_flow
+            _pending_flow = _qsk["steps"]
+            set_mode("pending", "执行技能确认")
+            log("  [待确认] 执行技能「%s」共 %d 步？说 确认 或 取消" % (_qsk.get("name", ""), len(_qsk["steps"])))
+            if OVN: OVN.set("执行技能「%s」共 %d 步？\n说 确认 或 取消" % (_qsk.get("name", ""), len(_qsk["steps"])))
+            return
     # 停止词(最高优先级): 仅裸『退出/停止』或『退出助手/退出程序』才退, 『退出记事本』等不算
     if is_stop_command(text):
         log("收到停止指令, 退出中...")

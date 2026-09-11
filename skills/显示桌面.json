@@ -1,0 +1,22 @@
+{
+  "name": "显示桌面",
+  "triggers": [
+    "显示桌面",
+    "回到桌面",
+    "最小化全部"
+  ],
+  "steps": [
+    {
+      "action": "press",
+      "params": {
+        "keys": [
+          "winleft",
+          "d"
+        ]
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；Win+D 显示桌面",
+  "created": "2026-09-01 14:21:09"
+}

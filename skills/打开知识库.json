@@ -1,0 +1,20 @@
+{
+  "name": "打开知识库",
+  "triggers": [
+    "打开知识库",
+    "打开obsidian",
+    "打开 Obsidian",
+    "打开笔记"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "obsidian"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；Obsidian（知识库客户端）",
+  "created": "2026-09-01 14:21:09"
+}

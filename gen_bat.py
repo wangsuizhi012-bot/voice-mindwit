@@ -17,7 +17,7 @@ lines = [
     "",
     'set "PY="',
     'if exist venv\\Scripts\\python.exe set "PY=venv\\Scripts\\python.exe"',
-    'if "%PY%"=="" if exist ..\\funasr-test\\venv\\Scripts\\python.exe set "PY=..\\funasr-test\\venv\\Scripts\\python.exe"',
+    'if "%PY%"=="" if exist ..\\_experiments\\funasr-test\\venv\\Scripts\\python.exe set "PY=..\\_experiments\\funasr-test\\venv\\Scripts\\python.exe"',
     'if not "%PY%"=="" goto run',
     "echo First run: creating venv and installing deps - may take a few minutes",
     "python -m venv venv",

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """小工具：列出当前前台窗口里所有可点击/可命名的控件。
 用法：
-    E:\AI\funasr-test\venv\Scripts\python.exe inspect_foreground.py
+    E:\AI\_experiments\funasr-test\venv\Scripts\python.exe inspect_foreground.py
 先把目标窗口切到前台，再运行，看输出里有没有你要点的文字。
 """
 import sys

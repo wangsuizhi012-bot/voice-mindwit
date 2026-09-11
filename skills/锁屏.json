@@ -1,0 +1,22 @@
+{
+  "name": "锁屏",
+  "triggers": [
+    "锁屏",
+    "锁电脑",
+    "锁定屏幕"
+  ],
+  "steps": [
+    {
+      "action": "press",
+      "params": {
+        "keys": [
+          "winleft",
+          "l"
+        ]
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；Win+L 锁屏（执行后需密码解锁，慎说）",
+  "created": "2026-09-01 14:21:09"
+}

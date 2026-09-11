@@ -1,0 +1,19 @@
+{
+  "name": "打开ComfyUI界面",
+  "triggers": [
+    "打开comfyui界面",
+    "comfyui界面",
+    "绘画界面"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "http://127.0.0.1:8188"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；浏览器打开 :8188（需 ComfyUI 已启动）",
+  "created": "2026-09-01 14:21:09"
+}

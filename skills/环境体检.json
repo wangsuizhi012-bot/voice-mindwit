@@ -1,0 +1,30 @@
+{
+  "name": "环境体检",
+  "triggers": [
+    "环境体检",
+    "体检"
+  ],
+  "steps": [
+    {
+      "action": "open",
+      "params": {
+        "app": "终端"
+      }
+    },
+    {
+      "action": "type",
+      "params": {
+        "text": "python E:\\AI\\agent-hub\\scripts\\self_check.py"
+      }
+    },
+    {
+      "action": "press",
+      "params": {
+        "key": "enter"
+      }
+    }
+  ],
+  "source": "preset",
+  "note": "预置脚本 2026-08-30；端口/磁盘/显存/venv 一键体检",
+  "created": "2026-09-01 14:21:09"
+}

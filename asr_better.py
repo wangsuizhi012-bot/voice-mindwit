@@ -5,6 +5,7 @@
   - "local"  (默认): 沿用 SenseVoiceSmall + GPU。本机实测中文 CER 4.2%,
                      已优于 Whisper-Small(5.8%), 识别率问题通常不在模型本身,
                      而在 VAD 截断 / 麦克风 / GPU 未启用 / 领域词。后台加载不阻塞 UI。
+                     模型挡位用 config.asr_model 切换(默认 iic/SenseVoiceSmall)。
   - "server"       : 走常驻 funasr-server(OpenAI 兼容, 默认 :8000), 启动零等待,
                      识别率与本地一致 -> 这是「打开快」的最佳解。需先起服务:
                      funasr-server --device cuda   (funasr / vllm 自带)
@@ -63,8 +64,12 @@ class ASRLocal(ASRBase):
     def load(self):
         import torch
         from funasr import AutoModel
+        cfg = _load_cfg()
+        # config.asr_model 可换挡: 默认 SenseVoiceSmall(快/综合优),
+        # 可选 paraformer-large(流式更稳/字级时间戳) 或 FireRedASR-AED(中文精度天花板, 需新版 funasr)
+        model_name = (cfg.get("asr_model") or "iic/SenseVoiceSmall").strip()
         self._device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self._model = AutoModel(model="iic/SenseVoiceSmall", vad_model="fsmn-vad",
+        self._model = AutoModel(model=model_name, vad_model="fsmn-vad",
                                device=self._device, disable_update=True)
         self._ready = True
 
