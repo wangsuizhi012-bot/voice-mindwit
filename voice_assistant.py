@@ -381,13 +381,19 @@ def ensure_asr_ready(timeout=120):
         time.sleep(0.3)
     return _asr.ready()
 
-def _clog(msg, kind="dim"):
-    """把管道事件送进听写窗口的终端面板(可视化进程)。"""
-    if _dictation_ui is not None:
-        try:
-            _dictation_ui.log(msg, kind)
-        except Exception:
-            pass
+def _clog(msg, kind="dim", stage=None):
+    """把管道事件送进听写窗口的终端面板(可视化进程)。
+
+    stage: MIC/VAD/ASR/POLISH/PASTE, 非 None 时同时高亮该阶段。
+    """
+    if _dictation_ui is None:
+        return
+    try:
+        _dictation_ui.log(msg, kind)
+        if stage:
+            _dictation_ui.set_stage(stage)
+    except Exception:
+        pass
 
 
 def transcribe(int16_audio, partial=False, command=True):
