@@ -7,11 +7,15 @@
 """
 import sys, os, json, time, queue, threading, re
 import requests
-import asr_better          # ASR 抽象层(local GPU / server + 纠错词典)
+import asr_better          # ASR 抽象层(local GPU / server + 纠错词典 + 音频前端)
+import asr_polish          # LLM 校对(同音错字 / 标点 / 术语归一)
+import dictation           # 按键触发语音输入(Typeless 式听写)
+import dictation_ui        # 听写悬浮指示器(逐字显示)
 import dialogue            # 多轮对话 + TTS(Windows SAPI)
 import skills              # 技能存储(复用 macro 步骤格式)
 import skill_trainer       # 截图->视觉模型->技能
 import visual_click        # 运行时视觉点击(网格动作空间)
+import decision            # 决策引擎开关(原 LLM / Laya / auto)
 
 # ---- 控制台/文件统一 UTF-8 (Windows 控制台默认即 UTF-8, PEP528) ----
 os.environ.setdefault("TQDM_DISABLE", "1")   # 关 FunASR 进度条噪声
@@ -37,7 +41,8 @@ os.makedirs(SHOTS_DIR, exist_ok=True)
 # ---- 默认配置(可被 config.json 覆盖) ----
 CONFIG = {
     "mic_keyword": "",            # 麦克风关键字; 留空=跟随 Windows 默认输入设备
-    "llm_base": "http://localhost:1234/v1",
+    "llm_base": "http://localhost:9292/v1",   # llama-swap 网关唯一入口（原 :1234 已废）
+    "model": "spark",                          # 显式指定；不填则自动探测（网关按字母序返回，data[0] 会是 kv27b，错配）
     "screenshot_mode": "active_window",  # active_window | full | region
     "screenshot_region": None,             # [x,y,w,h] 当 mode=region
     "auto_send": False,           # 截图粘贴后是否自动按回车发送(默认关, 安全第一)
@@ -52,11 +57,56 @@ CONFIG = {
     "ocr_fallback": False,       # OCR 兜底(默认关: 边聊天边用会误命中聊天窗口文字; 需要时设 true)
     "tts": True,                 # 对话回复是否用 Windows SAPI 朗读(零依赖, 全程本地)
     "chat_enabled": True,        # 非命令语音是否走多轮对话(关=原行为, none 不回复)
-    "asr_mode": "local",         # local(SenseVoice GPU) | server(funasr-server, 秒开)
+    "asr_mode": "local",         # local(SenseVoice) | server(funasr-server, 秒开)
     "asr_server": "http://localhost:8000/v1",
     "correction_dict": {},       # 纠错词典: {"误识别":"正确写法"} 低成本提升识别率
+    # ---- 2026-09-28 准确率专项(详见 asr_better.py 文件头) ----
+    "asr_target_peak": 0.90,     # 峰值归一化目标(0~1): 小声说话的最大收益项
+    "asr_max_gain": 12.0,        # 增益上限(倍): 防把噪声底噪放大成人声
+    "asr_min_rms": 0.004,        # 噪声门: 整段 RMS 低于此值判噪声丢弃(防「L, A A」)
+    "asr_language": "auto",      # auto | zh | en | yue | ja | ko
+    "asr_short_force_zh": True,  # 短音频(<asr_short_sec)强制 zh: auto 在 1~2s 上会翻车
+    "asr_short_sec": 2.5,
+    "strip_fillers": True,       # 语气词过滤(嗯/啊/呃)
+    "auto_space": True,          # 中文与英文/数字之间自动加空格
+    "asr_vocab": [],             # 领域术语表(用于 LLM 校对偏置, 逼近 ASR 热词)
+    "asr_polish": True,          # 听写结果是否走本地 LLM 校对
+    "asr_polish_command": False, # 指令模式是否也校对(默认关, 以免改变指令语义)
+    "asr_polish_min_chars": 6,
+    "asr_polish_timeout_s": 6.0,
+    # ---- 按键语音输入(听写), 详见 dictation.py 文件头 ----
+    "dictation_enabled": True,
+    "dictation_hotkey": "ctrl+alt+space",
+    "dictation_hotkey_mode": "auto",     # auto(长按=按住说, 短按=切换) | hold | toggle
+    "dictation_tap_ms": 250,
+    "dictation_cancel_key": "esc",
+    "dictation_output": "paste",         # paste | clipboard | none
+    "dictation_partial": True,
+    "dictation_partial_interval_s": 0.7,
+    "dictation_partial_min_new_s": 0.5,
+    "dictation_max_seconds": 60,
+    "dictation_silence_stop_s": 0,       # 0=关; >0 则在切换模式下静音自动结束
+    "dictation_restore_clipboard": True, # 上屏后还原原剪贴板
+    "dictation_paste_delay_s": 0.35,
+    "dictation_history": True,
+    "dictation_ui": True,
+    "dictation_console": True,   # 终端风格管道面板(可视化进程, 不黑箱)
+    "dictation_font_size": 20,
+    "dictation_char_ms": 30,             # 逐字动画速度(ms/字)
+    "dictation_idle_hide_s": 3.0,
+    "dictation_bottom_margin": 120,
     "vl_base": "http://localhost:1235/v1",   # 本地视觉模型(Qwen3-VL)用于技能训练/视觉点击
     "trainer": {"base": "", "key": "", "model": ""},  # 云端多模态(可选, 留空=用本地VL)
+    # ---- 演示录制(说口令 -> 录真实键鼠操作 -> 编译成可重放脚本) ----
+    "demo_max_seconds": 120,      # 单次演示录制上限(秒), 到点自动停并保存
+    "demo_max_events": 300,       # 单次最多记录多少个事件, 防跑飞
+    "demo_ai_compile": True,      # 录完用本地 LLM 修正 OCR 锚点(关=纯坐标, 更快)
+    "demo_strict": False,         # 重放时断言拿不到证据是否中止(False=放行, 适合演示脚本)
+    # ---- 决策引擎: 意图理解用哪个模型 ----
+    "decision_engine": "llm",     # llm(原模型, 走 llm_base) | laya(本地决策模型) | auto(Laya 优先, 低置信度回退 LLM)
+    "laya_base": "http://127.0.0.1:8801",   # laya_serve.py 的地址(托管 venv 里跑)
+    "laya_min_conf": 0.70,        # Laya 置信度低于此值则回退原模型
+    "laya_fallback_llm": True,    # laya 模式下低于阈值是否回退(True=稳妥; False=纯 Laya, 低置信度直接 none)
 }
 
 def load_config():
@@ -137,9 +187,55 @@ class Overlay:
         "pending":   "● 待确认",
     }
     def __init__(self):
+        # ★ Tk 在 Windows 上不是线程化的: Tk() 的创建线程 == mainloop() 的线程 ==
+        # 所有界面调用的线程。跨线程调 `after` 会抛
+        # "Calling Tcl from different apartment", 而旧写法把这个异常吞了 ——
+        # 结果就是这个常驻小窗一直停在初始文案上(根本没在刷新)。
+        # 修法: Tk 完全跑在自己的线程里, 外部只往 _q 丢命令, 由 Tk 线程自己排空执行。
+        import queue as _q
+        self._q = _q.Queue()
+        self._ready = threading.Event()
+        self.root = None
+        self.rect = (0, 0, 0, 0)
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+        return self._ready.wait(timeout=5.0)
+
+    def _run(self):
         import tkinter as tk
         self.tk = tk
-        self.root = tk.Tk()
+        try:
+            self.root = tk.Tk()
+        except Exception:
+            self.root = None
+            self._ready.set()
+            return
+        self._build()
+        self._ready.set()
+        try:
+            self.root.mainloop()
+        except Exception:
+            pass
+
+    def _drain(self):
+        """在 Tk 线程里排空命令队列(每 25ms 一轮)。"""
+        try:
+            while True:
+                fn = self._q.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self.root.after(25, self._drain)
+        except Exception:
+            pass
+
+    def _build(self):
+        import tkinter as tk
         self.root.title("语音助手")
         self.root.attributes("-topmost", True)
         # 定位右上角(top-right)
@@ -148,7 +244,7 @@ class Overlay:
             sw, sh = pyautogui.size()
         except Exception:
             sw, sh = 1920, 1080
-        w, h = 420, 150
+        w, h = 460, 178
         x = max(12, sw - w - 12)
         y = 12
         self.rect = (x, y, w, h)   # 小窗屏幕位置, 供 OCR 排除该区域(不关窗)
@@ -169,11 +265,12 @@ class Overlay:
         # 主内容
         self.var = tk.StringVar(value="监听中…\n（说 退出 停止）")
         self.label = tk.Label(self.root, textvariable=self.var,
-                              font=("Microsoft YaHei UI", 12), wraplength=w-24,
+                              font=("Microsoft YaHei UI", 14), wraplength=w-32,
                               justify="left", anchor="nw",
-                              bg="#1e1e2e", fg="#e6e6e6")
-        self.label.pack(fill="both", expand=True, padx=12, pady=8)
-        self.root.update()
+                              bg="#1e1e2e", fg="#f2f2f6")
+        self.label.pack(fill="both", expand=True, padx=16, pady=10)
+        self.root.update_idletasks()
+        self._drain()
     def _apply(self, text):
         try:
             self.var.set(text)
@@ -192,16 +289,17 @@ class Overlay:
             pass
     def set(self, text):
         try:
-            self.root.after(0, self._apply, text)
+            self._q.put(lambda: self._apply(text))
         except Exception:
             pass
     def set_mode(self, mode, detail=""):
-        """更新右上角模式色条(线程安全)。"""
+        """更新右上角模式色条(线程安全 —— 走命令队列, 不跨线程碰 Tk)。"""
         try:
-            self.root.after(0, self._apply_mode, mode, detail)
+            self._q.put(lambda: self._apply_mode(mode, detail))
         except Exception:
             pass
     def run(self):
+        """兼容旧调用: 阻塞跑 mainloop(应在创建它的同一线程里调)。"""
         try:
             self.root.mainloop()
         except Exception:
@@ -214,6 +312,8 @@ _asr = None
 _asr_corr = {}
 _asr_mode = "local"
 _dialogue = None
+_dictation = None          # 按键听写(dictation.Dictation)
+_dictation_ui = None       # 听写悬浮指示器(dictation_ui.DictationUI)
 _skill_recording = None     # 录制技能态: 非 None 时逐条记录意图, 说"完成"存为技能
 
 # ---- 模式状态机(右上角状态栏) ----
@@ -257,7 +357,12 @@ def build_asr_backend():
         def _load():
             try:
                 _asr.load()
-                log("ASR 模型就绪(GPU)")
+                try:
+                    dev = _asr.device()
+                except Exception:
+                    dev = "?"
+                log("ASR 模型就绪(device=%s)%s" % (
+                    dev, "" if dev == "cuda:0" else "  ← CPU 推理，装 CUDA 版 torch 可提速"))
             except Exception as e:
                 log("ASR 加载失败: " + repr(e))
         threading.Thread(target=_load, daemon=True).start()
@@ -276,11 +381,55 @@ def ensure_asr_ready(timeout=120):
         time.sleep(0.3)
     return _asr.ready()
 
-def transcribe(int16_audio):
+def _clog(msg, kind="dim"):
+    """把管道事件送进听写窗口的终端面板(可视化进程)。"""
+    if _dictation_ui is not None:
+        try:
+            _dictation_ui.log(msg, kind)
+        except Exception:
+            pass
+
+
+def transcribe(int16_audio, partial=False, command=True):
+    """统一转写入口: 音频前端 -> 语言策略 -> 识别 -> 文本后处理 -> (可选)LLM 校对。
+
+    partial=True : 听写实时中间结果。只跑「前端 + 词典」, 跳过 LLM 校对
+                   —— 中间结果本来就会变, 校对纯属浪费时间。
+    command=True : 指令模式。是否走 LLM 校对由 asr_polish_command 决定(默认关)。
+    """
     if _asr is None:
         return ""
-    text = _asr.transcribe(int16_audio)
-    return asr_better.apply_correction(text, _asr_corr)
+    if asr_better.is_noise(int16_audio, CONFIG):
+        rms, _ = asr_better.audio_stats(int16_audio)
+        _clog("[前端] 噪声门丢弃 rms=%.4f < %.4f"
+              % (rms, float(CONFIG.get("asr_min_rms", 0.004))), "err")
+        if not partial:
+            log("  [噪声门] 丢弃低能量段 rms=%.4f < %.4f"
+                % (rms, float(CONFIG.get("asr_min_rms", 0.004))))
+        return ""
+    audio, _info = asr_better.preprocess(int16_audio, CONFIG)
+    lang = asr_better.pick_language(audio, CONFIG)
+    _clog("[前端] rms=%.4f peak=%.2f gain=%.1f lang=%s"
+          % (_info["rms"], _info["peak"], _info["gain"], lang), "mic", "ASR")
+    text = _asr.transcribe(audio, language=lang)
+    text = asr_better.postprocess(text, CONFIG, _asr_corr)
+    if not text:
+        return ""
+    # ---- LLM 校对(仅最终结果) ----
+    if not partial:
+        want = CONFIG.get("asr_polish_command", False) if command \
+            else CONFIG.get("asr_polish", True)
+        if want and len(text) >= int(CONFIG.get("asr_polish_min_chars", 6)):
+            new, note = asr_polish.polish(
+                text, base=CONFIG.get("llm_base"), model=(_MODEL_ID or CONFIG.get("model")),
+                vocab=CONFIG.get("asr_vocab") or [],
+                timeout=float(CONFIG.get("asr_polish_timeout_s", 6.0)))
+            if new != text:
+                log("  [校对] " + note)
+                _clog("[校对] " + note, "polish")
+                _clog("[校对] %s → %s" % (text, new), "polish", "PASTE")
+                text = new
+    return text
 
 # ---- LLM 意图 ----
 _MODEL_ID = None
@@ -288,13 +437,20 @@ def detect_model():
     global _MODEL_ID
     if _MODEL_ID:
         return _MODEL_ID
+    # 优先用显式配置。网关 /v1/models 是字母序，盲取 data[0] 会选中 kv27b
+    # （244K 长上下文重档：冷启动 18s、32 tok/s、需 12GB 空闲内存），对意图解析是错配。
+    explicit = CONFIG.get("model") or ""
+    if explicit:
+        _MODEL_ID = explicit
+        log("本地 LLM(配置指定): " + _MODEL_ID)
+        return _MODEL_ID
     try:
         r = requests.get(CONFIG["llm_base"] + "/models", timeout=5)
         j = r.json()
         data = j.get("data") or j.get("models") or []
         if data:
             _MODEL_ID = data[0]["id"]
-            log("本地 LLM: " + _MODEL_ID)
+            log("本地 LLM(自动探测): " + _MODEL_ID)
             return _MODEL_ID
     except Exception as e:
         log("探测 LLM 模型失败(用占位名): " + repr(e))
@@ -348,6 +504,8 @@ def llm_intent(text):
     params = intent.get("params", {}) or {}
     log("意图：" + str(intent.get("action", "?")) + "  " + json.dumps(params, ensure_ascii=False))
     return intent
+
+decision.bind(CONFIG, llm_intent)
 
 # ---- 动作执行 ----
 def copy_image_to_clipboard(img):
@@ -598,6 +756,7 @@ _pending = {"intent": None}
 _teach_pending = None   # 教学态: click_target 失败时, 等用户手动点一下记进记忆库
 _recording = None       # 录制宏: 非 None 时表示正在录制, {"name":..., "steps":[...]}
 _pending_flow = None    # 重放流程前的整体二次确认, 存步骤列表
+_demo = None            # 演示录制: 非 None 时正在录键鼠脚本, {"rec","name","state"}
 
 def validate_intent(intent):
     """校验 LLM 返回的意图 JSON。返回 (ok, reason)。解析失败/越界一律拒绝执行。"""
@@ -916,6 +1075,175 @@ def _stop_record(name):
     if OVN:
         OVN.set("已保存流程「%s」\n共 %d 步。说「执行流程%s」重放" % (nm, len(steps), nm))
 
+# ---- 演示录制: 口令「请你跟我这样做」-> 录真实键鼠操作 -> 编译成可重放脚本 ----
+# 与「录制宏」的区别(两套并存, 别混):
+#   录制宏 = 你口头说一串指令, 存 intent 列表(说「录制」开始)
+#   演示录制 = 你动手做一遍, 系统录键鼠+截图, 编译成带文字锚点的 DAG(说口令开始)
+_DEMO_CORES = ("跟我这样做", "跟你这样做", "跟我做", "跟你做", "跟我学", "跟你学")
+_DEMO_STOP_WORDS = ("停止录制", "结束录制", "录完了", "录好了", "就到这里", "到此为止",
+                    "停止", "结束", "完成", "保存", "好了", "就这样")
+
+
+def _norm_zh(s):
+    """归一化: 只留中英文数字, 去掉标点空格(ASR 会乱加标点)。"""
+    return "".join(ch for ch in (s or "") if ch.isalnum())
+
+
+def _is_demo_wake(text):
+    """口令模糊匹配。ASR 常漏字/加字(如「你就跟我这样做」), 只认核心片段。"""
+    n = _norm_zh(text)
+    return len(n) >= 4 and any(c in n for c in _DEMO_CORES)
+
+
+def _is_demo_stop(text):
+    n = _norm_zh(text)
+    return bool(n) and any(w in n for w in _DEMO_STOP_WORDS)
+
+
+def _demo_name_from(text):
+    """口令里带名字: 「…这样做 叫 打卡流程」 -> 打卡流程; 没有则用时间戳名。"""
+    m = re.search(r"(?:叫|名为|命名为|保存为|存为)\s*([\w\u4e00-\u9fa5]{1,20})", text or "")
+    return _clean_flow_name(m.group(1)) if m else ""
+
+
+def _start_demo_record(name=""):
+    """启动键鼠演示录制(后台线程), 到点/口令/热键停。"""
+    global _demo, _tts_until
+    if _demo is not None:
+        log("  已在演示录制中(编译中或录制中)")
+        return
+    try:
+        import recorder
+    except Exception as e:
+        log("  演示录制不可用: " + repr(e))
+        if OVN:
+            OVN.set("演示录制不可用\n请 pip install pynput")
+        return
+    nm = name or ("demo_" + time.strftime("%m%d_%H%M%S"))
+    dur = int(CONFIG.get("demo_max_seconds", 120) or 120)
+    rec = recorder.Recorder(max_events=int(CONFIG.get("demo_max_events", 300)))
+    _demo = {"rec": rec, "name": nm, "state": "recording", "t0": time.time()}
+    threading.Thread(target=_demo_worker, args=(rec, nm, dur), daemon=True).start()
+    set_mode("recording", "演示录制")
+    log("  ▶ 演示录制开始(最多 %ds)：正常操作鼠标键盘即可；说「停止」或按 F9 保存" % dur)
+    if OVN:
+        OVN.set("演示录制中…\n正常操作即可，说「停止」/按 F9 保存")
+    _tts_until = time.time() + 2.0   # 开场瞬间屏蔽回采, 防助手听到自己说话
+
+
+def _stop_demo_record():
+    """请求停止录制(录音线程随后编译保存)。"""
+    global _demo
+    if _demo is None:
+        return
+    rec = _demo.get("rec")
+    if _demo.get("state") == "recording":
+        _demo["state"] = "stopping"
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:
+                pass
+        log("  演示录制停止，正在编译…")
+        if OVN:
+            OVN.set("录制结束，编译中…")
+
+
+def _fallback_nodes(events):
+    """编译链(nuphus/OCR)不可用时的降级: 直接按坐标记录, 至少能重放。"""
+    nodes = []
+    for i, ev in enumerate(events, 1):
+        k = ev.get("kind")
+        if k == "type":
+            nodes.append({"do": "type", "text": ev.get("text", "")})
+        elif k == "key":
+            nodes.append({"do": "hotkey", "keys": ev.get("keys", [])})
+        elif k == "click":
+            n = {"do": "double_click" if ev.get("button") == "double" else "click",
+                 "id": "s%d" % i, "target": "", "at": [ev.get("x"), ev.get("y")]}
+            w = ev.get("win") or {}
+            if w.get("process"):
+                n["window"] = w["process"]
+            nodes.append(n)
+    return nodes
+
+
+def _demo_worker(rec, name, duration):
+    """录制 -> 编译 -> 保存。全程后台, 不阻塞语音监听。"""
+    global _demo
+    try:
+        import recorder
+        events = rec.run(duration)
+        if not events:
+            log("  没录到任何操作，未保存")
+            if OVN:
+                OVN.set("没录到操作，未保存")
+            return
+        try:
+            nodes, notes = recorder.compile_events(events, name)
+        except Exception as e:
+            log("  编译失败(%r)，降级为坐标脚本" % (e,))
+            nodes, notes = _fallback_nodes(events), ["编译降级：按坐标记录，移植性差"]
+        if not nodes:
+            log("  编译后无有效步骤，未保存")
+            return
+        if CONFIG.get("demo_ai_compile", True):
+            try:
+                nodes, aimsg = recorder.ai_clean(nodes)
+                notes.append("AI 编译：" + aimsg)
+            except Exception as e:
+                notes.append("AI 编译失败：" + repr(e))
+        path = recorder.save_flow(name, nodes, extra={
+            "source": "voice_demo", "raw_event_count": len(events),
+            "compile_notes": notes})
+        log("  ✅ 已保存脚本「%s」共 %d 步 -> %s" % (name, len(nodes), path))
+        for n in notes[:5]:
+            log("    · " + str(n))
+        if OVN:
+            OVN.set("已保存脚本「%s」\n共 %d 步，说「执行流程%s」重放" % (name, len(nodes), name))
+    except Exception as e:
+        log("  演示录制出错: " + repr(e))
+    finally:
+        _demo = None
+        set_mode("listen")
+
+
+def _handle_demo(text):
+    """演示录制口令: 命中即开始; 录制中吞掉所有语音(只认停止词), 防误执行指令。"""
+    global _demo
+    if _demo is not None:
+        if _is_demo_stop(text):
+            _stop_demo_record()
+        return True
+    if _is_demo_wake(text):
+        _start_demo_record(_demo_name_from(text))
+        return True
+    return False
+
+
+def _execute_dag(steps):
+    """重放演示录制的脚本: 按文字锚点运行时重新定位, 抗窗口移动/分辨率变化。"""
+    try:
+        import agent_core as ac
+    except Exception as e:
+        log("  agent_core 不可用: " + repr(e))
+        return
+    set_mode("command", "重放脚本")
+    try:
+        ok, lines, _res = ac.run_dag(steps, dry_run=False, reflect_retries=1,
+                                     strict=bool(CONFIG.get("demo_strict", False)))
+    except Exception as e:
+        log("  重放出错: " + repr(e))
+        if OVN:
+            OVN.set("重放出错：" + str(e)[:40])
+        return
+    for line in (lines or [])[-20:]:
+        log("  " + str(line))
+    log("  脚本执行完毕: " + ("成功" if ok else "有步骤未通过(见日志)"))
+    if OVN:
+        OVN.set("脚本执行" + ("成功" if ok else "未完成") + "\n详见控制台/日志")
+
+
 def _run_flow(name):
     global _pending_flow
     from macro import load_flow, list_flows
@@ -942,6 +1270,9 @@ def _run_flow(name):
         OVN.set("执行流程「%s」共 %d 步？\n说 确认 或 取消" % (data.get("name", name), len(steps)))
 
 def _execute_flow(steps):
+    # 演示录制产出的脚本是 agent_core DAG(键"do"), 与语音宏(action/params)不同, 分路执行
+    if steps and isinstance(steps[0], dict) and "do" in steps[0]:
+        return _execute_dag(steps)
     for i, st in enumerate(steps, 1):
         if not RUNNING:
             break
@@ -974,6 +1305,7 @@ class Listener:
         self.triggered = False
         self.last_speech = 0.0
         self.seg_start = 0.0
+        self._subs = []            # 音频订阅者(按键听写复用同一路麦克风)
         # ---- VAD 引擎: silero(主, 鲁棒) / webrtcvad(兜底) ----
         self.engine = (CONFIG.get("vad_engine") or "webrtcvad").lower()
         if self.engine == "silero":
@@ -1009,6 +1341,14 @@ class Listener:
             except Exception as e:
                 log("唤醒词加载失败, 改持续监听: " + repr(e))
 
+    def subscribe(self, fn):
+        """注册音频订阅者: 每块麦克风数据都会同步转发一份。
+
+        为什么不给听写单独开一路 InputStream: PortAudio 在 WASAPI 下同一设备
+        只允许一个独占流, 双开会直接报 PortAudioError。复用这一路最稳。
+        """
+        self._subs.append(fn)
+
     def _armed(self):
         import time as _t
         if self.wake_model is None:
@@ -1042,7 +1382,21 @@ class Listener:
             self._feed(data)
 
     def _feed(self, data):
-        import numpy as np, time as _t
+        import time as _t
+        # 预滚动缓冲(两个 VAD 引擎共用): 触发前先留一段, 否则句首会被吞掉
+        self.preroll.append(data)
+        if len(self.preroll) > PREROLL_FRAMES:
+            self.preroll.pop(0)
+        # 订阅者(按键听写): 录音期间独占音频, 命令 VAD 让位 —— 一句话只处理一次,
+        # 否则听写的同时还会被当指令执行一遍。
+        for fn in self._subs:
+            try:
+                fn(data)
+            except Exception:
+                pass
+        if _dictation is not None and _dictation.recording:
+            return
+        import numpy as np
         # 唤醒词门控: 累积 1280 样本喂 openwakeword
         if self.wake_model is not None:
             self._wake_buf.append(data)
@@ -1075,9 +1429,6 @@ class Listener:
             is_speech = self.vad.is_speech(data, SAMPLE_RATE)
         except Exception:
             is_speech = False
-        self.preroll.append(data)
-        if len(self.preroll) > PREROLL_FRAMES:
-            self.preroll.pop(0)
         now = _t.time()
         if is_speech:
             if not self.triggered:
@@ -1107,7 +1458,8 @@ class Listener:
         if out:
             if "start" in out and not self.triggered:
                 self.triggered = True
-                self.seg = [data]
+                # 补上预滚动: silero 判定 start 时首音节已经过去了, 不补就吞字
+                self.seg = list(self.preroll) + [data]
                 self.seg_start = now
             if "end" in out and self.triggered:
                 self.seg.append(data)
@@ -1154,8 +1506,20 @@ def on_segment(audio):
     if OVN:
         OVN.set("听到：" + shown + "\n（理解中…）")
     set_mode("thinking")   # 右上角状态: 理解中
+    # 演示录制口令(最高优先: 录制中要吞掉全部语音, 避免边操作边误触发指令)
+    if _handle_demo(text):
+        return
     # 录制宏 meta 指令(优先, 避免"停止录制"被 STOP_WORDS 的"停止"误判退出)
     if _handle_macro(text):
+        return
+    # 决策引擎切换口令: "用laya"/"用原模型"/"自动模式" —— 说一句即切, 并写回 config.json
+    _sw = decision.match_switch(text)
+    if _sw:
+        ok, msg = decision.set_engine(_sw)
+        log("  [引擎] " + msg)
+        if OVN:
+            OVN.set("决策引擎已切换：\n" + {"llm": "原模型(LLM)", "laya": "Laya 决策模型",
+                                            "auto": "自动(Laya 优先)"}.get(_sw, _sw))
         return
     # 技能指令(学习/执行/录制/列出/删除/聊天开关)
     if _handle_skill(text):
@@ -1206,8 +1570,15 @@ def on_segment(audio):
             return
         log("  丢弃未确认指令, 处理新指令")
         _pending["intent"] = None
-    # 正常解析
-    intent = llm_intent(text)
+    # 正常解析(引擎由 config.decision_engine 决定: llm / laya / auto)
+    intent = decision.intent(text)
+    _eng = intent.get("engine", "?")
+    if _eng == "laya":
+        log("  [引擎] Laya  conf=%s  %dms" % (intent.get("confidence"), intent.get("ms", 0)))
+    elif intent.get("_fallback"):
+        log("  [引擎] 原模型(回退)  Laya=%s" % (intent.get("_laya") or {}).get("action"))
+    else:
+        log("  [引擎] 原模型(LLM)")
     ok, reason = validate_intent(intent)
     if not ok:
         log("  拒绝执行(校验失败): " + reason)
@@ -1262,7 +1633,7 @@ _HOTKEY_VK = {"f5": 0x74, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "esc
 def stop_hotkey_watcher():
     """后台线程轮询全局热键: stop_hotkey=停止整个程序; stop_recording_hotkey=停止录制宏并保存。"""
     import win32api
-    global RUNNING, _recording
+    global RUNNING, _recording, _demo
     stop_key = str(CONFIG.get("stop_hotkey", "f8")).lower()
     stop_vk = _HOTKEY_VK.get(stop_key, 0x77)
     rec_key = str(CONFIG.get("stop_recording_hotkey", "f9")).lower()
@@ -1281,6 +1652,9 @@ def stop_hotkey_watcher():
                 if _recording is not None:
                     _stop_record("")
                     log("  [热键 %s] 已停止录制" % rec_key.upper())
+                elif _demo is not None:
+                    _stop_demo_record()
+                    log("  [热键 %s] 已停止演示录制" % rec_key.upper())
                 else:
                     log("  [热键 %s] 当前未在录制" % rec_key.upper())
                 time.sleep(0.3)   # 防抖, 避免一次按下重复触发
@@ -1306,7 +1680,9 @@ def main():
     # 置顶小窗(可选, 失败也不影响主功能) —— 先弹窗, 感知启动更快
     try:
         OVN = Overlay()
-        threading.Thread(target=OVN.run, daemon=True).start()
+        if not OVN.start():
+            log("置顶窗未启动(仅控制台输出)")
+            OVN = None
     except Exception as e:
         log("置顶窗不可用(仅控制台输出): " + repr(e))
         OVN = None
@@ -1322,6 +1698,26 @@ def main():
     log("对话模块就绪" + ("" if CONFIG.get("tts", True) else "（TTS 关闭）"))
     device = choose_mic()
     lis = Listener(device)
+    # ---- 按键听写(Typeless 式): 悬浮指示器 + 全局热键, 复用同一路麦克风 ----
+    if CONFIG.get("dictation_enabled", True):
+        global _dictation, _dictation_ui
+        try:
+            _dictation_ui = dictation_ui.DictationUI(CONFIG)
+            if not _dictation_ui.start():
+                log("听写指示器未启动(仅日志输出)")
+                _dictation_ui = None
+        except Exception as e:
+            log("听写指示器不可用(仅日志输出): " + repr(e)[:80])
+            _dictation_ui = None
+        try:
+            _dictation = dictation.Dictation(CONFIG, ui=_dictation_ui, log=log)
+            _dictation.bind_asr(
+                lambda a, partial=False: transcribe(a, partial=partial, command=False))
+            if _dictation.start_hotkeys():
+                lis.subscribe(_dictation.feed)
+        except Exception as e:
+            log("按键听写不可用: " + repr(e)[:80])
+            _dictation = None
     threading.Thread(target=stop_hotkey_watcher, daemon=True).start()
     try:
         lis.start()
@@ -1329,6 +1725,12 @@ def main():
         log("用户中断")
     finally:
         RUNNING = False
+        if _demo is not None:      # 退出前把正在录的演示存下来, 别白录
+            try:
+                _stop_demo_record()
+                time.sleep(1.0)
+            except Exception:
+                pass
         if lis.stream:
             try:
                 lis.stream.stop()
@@ -1357,5 +1759,27 @@ if __name__ == "__main__":
         print(json.dumps(llm_intent("点发送"), ensure_ascii=False))
         print(json.dumps(llm_intent("点确定按钮"), ensure_ascii=False))
         log("=== 自检结束 ===")
+    elif len(_sys.argv) > 1 and _sys.argv[1] == "--demo-match":
+        # 纯逻辑自检: 不开麦克风、不动鼠标
+        ok = 0
+        cases = [
+            ("请你跟我这样做，我就跟你这样做", True),
+            ("请你跟我这样做我就跟你这样做", True),
+            ("跟我这样做", True),
+            ("你跟我学一下", True),
+            ("今天天气不错", False),
+            ("打开记事本", False),
+        ]
+        for t, want in cases:
+            got = _is_demo_wake(t)
+            ok += (got == want)
+            print("%-6s wake=%-5s want=%-5s | %s" % ("PASS" if got == want else "FAIL", got, want, t))
+        for t in ("停止", "录好了", "就到这里", "打开微信"):
+            print("  stop(%-6s)=%s" % (t, _is_demo_stop(t)))
+        print("  name=%r" % _demo_name_from("请你跟我这样做 叫 打卡流程"))
+        print("  fallback=%s" % json.dumps(_fallback_nodes(
+            [{"kind": "click", "x": 10, "y": 20, "win": {"process": "notepad.exe"}},
+             {"kind": "type", "text": "hi"}]), ensure_ascii=False))
+        print("PASS %d/%d" % (ok, len(cases)))
     else:
         main()

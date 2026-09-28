@@ -44,7 +44,8 @@ def main():
     section("场景1 多轮对话 + TTS")
     try:
         from dialogue import Dialogue  # noqa
-        d = Dialogue(cfg.get("llm_base", "http://localhost:1234/v1"),
+        d = Dialogue(cfg.get("llm_base", "http://localhost:9292/v1"),
+                     preferred=cfg.get("model") or None,
                      tts_enabled=False)  # 先不发声，只验证对话
         r1 = d.ask("用一句话介绍你自己")
         record("对话·第一轮", bool(r1), f"LLM 回复: {r1[:50]}...")

@@ -32,10 +32,12 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# 已装 0.1.11 的二进制位置（npm 全局包内嵌平台包）
+# 已装 0.1.11 的二进制位置（npm 全局包内嵌平台包）。
+# 由 %APPDATA% 推导，不写死用户名（开源仓库不应暴露本机绝对路径）。
 _CANDIDATES = [
-    r"C:\Users\wsz945\AppData\Roaming\npm\node_modules\@nuphus\nuphus-mcp"
-    r"\node_modules\@nuphus\nuphus-mcp-win32-x64\bin\nuphus-mcp.exe",
+    os.path.join(os.environ.get("APPDATA", ""), "npm", "node_modules", "@nuphus",
+                 "nuphus-mcp", "node_modules", "@nuphus", "nuphus-mcp-win32-x64",
+                 "bin", "nuphus-mcp.exe"),
 ]
 
 

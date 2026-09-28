@@ -24,7 +24,11 @@ def _load_cfg():
     return {}
 
 
-def _detect_model(llm_base):
+def _detect_model(llm_base, preferred=None):
+    # 优先用显式指定的模型。网关 /v1/models 按字母序返回，
+    # 盲取 data[0] 会选中 kv27b（244K 重档），对短指令是错配。
+    if preferred:
+        return preferred
     try:
         r = requests.get(llm_base.rstrip("/") + "/models", timeout=5)
         j = r.json()
@@ -45,9 +49,9 @@ DEFAULT_SYS = (
 
 class Dialogue:
     def __init__(self, llm_base, model_id=None, tts_enabled=True,
-                 system_prompt=None, max_history=10):
+                 system_prompt=None, max_history=10, preferred=None):
         self.llm_base = llm_base.rstrip("/")
-        self.model_id = model_id or _detect_model(self.llm_base)
+        self.model_id = model_id or _detect_model(self.llm_base, preferred)
         self.tts_enabled = bool(tts_enabled)
         self.sys = system_prompt or DEFAULT_SYS
         self.max_history = max_history
