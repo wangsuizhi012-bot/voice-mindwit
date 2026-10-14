@@ -1,0 +1,49 @@
+{
+  "_comment": "专用词识别评测用例集 —— 与 测试文档-专用词识别验收-2026-09-28.md §3 一一对应。改这里等于改测试集，改完请同步文档。",
+  "_version": "2026-09-28",
+  "_total_terms": 35,
+  "cases": [
+    {"id": "T01", "group": "A", "text": "帮我用 ComfyUI 跑一张图", "terms": ["ComfyUI"]},
+    {"id": "T02", "group": "A", "text": "用 FLUX 模型生成一张头像", "terms": ["FLUX"]},
+    {"id": "T03", "group": "A", "text": "Nunchaku 加速开了没有", "terms": ["Nunchaku"]},
+    {"id": "T04", "group": "A", "text": "给这张图加个 ControlNet 约束", "terms": ["ControlNet"]},
+    {"id": "T05", "group": "A", "text": "把这个 LoRA 挂上去试试", "terms": ["LoRA"]},
+    {"id": "T06", "group": "A", "text": "用 Wan2.2 生成五秒视频", "terms": ["Wan2.2"]},
+    {"id": "T07", "group": "A", "text": "LTXV 的首尾帧工作流跑一下", "terms": ["LTXV"]},
+    {"id": "T08", "group": "A", "text": "MiniMax-H3 的采样器装好了吗", "terms": ["MiniMax-H3"]},
+    {"id": "T09", "group": "A", "text": "用 FlashVSR 把视频放大四倍", "terms": ["FlashVSR"]},
+    {"id": "T10", "group": "A", "text": "SeedVR2 修复一下画质", "terms": ["SeedVR2"]},
+
+    {"id": "T11", "group": "B", "text": "看看 llama.cpp 后端起没起", "terms": ["llama.cpp"]},
+    {"id": "T12", "group": "B", "text": "llama-swap 网关在哪个端口", "terms": ["llama-swap"]},
+    {"id": "T13", "group": "B", "text": "用 KVMem 跑长上下文测试", "terms": ["KVMem"]},
+    {"id": "T14", "group": "B", "text": "agent-hub 的服务栈状态怎么样", "terms": ["agent-hub", "服务栈"]},
+    {"id": "T15", "group": "B", "text": "n8n 的工作流有没有报错", "terms": ["n8n"]},
+    {"id": "T16", "group": "B", "text": "DSH 的 coding agent 启动一下", "terms": ["DSH"]},
+
+    {"id": "T17", "group": "C", "text": "打开智能中枢看下日志", "terms": ["智能中枢"]},
+    {"id": "T18", "group": "C", "text": "把 voice-assistant 的听写热键换一下", "terms": ["voice-assistant"]},
+    {"id": "T19", "group": "C", "text": "workbuddy 里帮我查一下今天的资讯", "terms": ["workbuddy"]},
+    {"id": "T20", "group": "C", "text": "obsidian 的知识库同步了吗", "terms": ["obsidian"]},
+    {"id": "T21", "group": "C", "text": "用 Qwen3-VL 看看这个界面", "terms": ["Qwen3-VL"]},
+    {"id": "T22", "group": "C", "text": "SageAttention 装好了没有", "terms": ["SageAttention"]},
+
+    {"id": "T23", "group": "D", "text": "康福有爱跑图", "terms": ["ComfyUI"]},
+    {"id": "T24", "group": "D", "text": "拉玛模型总结一下", "terms": ["llama"]},
+    {"id": "T25", "group": "D", "text": "闪光视觉放大", "terms": ["FlashVSR"]},
+    {"id": "T26", "group": "D", "text": "服务栈起来了吗", "terms": ["服务栈"]},
+    {"id": "T27", "group": "D", "text": "用赛奇注意力加速", "terms": ["SageAttention"]},
+
+    {"id": "T28", "group": "E", "text": "帮我把这段视频用 FlashVSR 放大四倍，然后丢给 SeedVR2 修画质", "terms": ["FlashVSR", "SeedVR2"]},
+    {"id": "T29", "group": "E", "text": "用 Wan2.2 生成首尾帧，再用 ComfyUI 拼一下", "terms": ["Wan2.2", "ComfyUI"]},
+    {"id": "T30", "group": "E", "text": "把 llama-swap 的 KVMem 模型换成 Qwen3-VL", "terms": ["llama-swap", "KVMem", "Qwen3-VL"]}
+  ],
+  "group_names": {
+    "A": "英文产品名/缩写",
+    "B": "技术栈/工具名",
+    "C": "中文领域词/中英混排",
+    "D": "同音/口语化说法",
+    "E": "长句多术语"
+  },
+  "must_pass": ["T01", "T26"]
+}

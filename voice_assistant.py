@@ -501,10 +501,17 @@ def llm_intent(text):
         "max_tokens": 300,
     }
     try:
-        r = requests.post(CONFIG["llm_base"] + "/chat/completions", json=payload, timeout=30)
+        # timeout 90: llama-swap 首请求要冷启动拉起模型进程(2.6G 加载 10~30s), 30s 会误杀
+        r = requests.post(CONFIG["llm_base"] + "/chat/completions", json=payload, timeout=90)
         content = r.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        log("LLM 调用失败: " + repr(e))
+        # 失败时带出响应片段, 别黑箱(瞬时失败多为网关返回错误体: choices 缺失)
+        diag = ""
+        try:
+            diag = "  HTTP %s  body=%s" % (r.status_code, r.text[:200])
+        except Exception:
+            pass
+        log("LLM 调用失败: " + repr(e) + diag)
         return {"action": "none", "params": {}, "reply": ""}
     intent = parse_json(content)
     params = intent.get("params", {}) or {}
@@ -888,6 +895,153 @@ def execute(intent, raw_text):
     except Exception as e:
         log("执行动作出错: " + repr(e))
 
+# ---- 全双工聊天(duplex.py): 流式逐句TTS + 播报中可插话打断 ----
+_spk_async = None       # duplex.AsyncSpeaker 单例(懒建)
+_bargein = None         # duplex.BargeInMonitor 单例(懒建)
+
+def _duplex_event(kind, msg):
+    """上报事件到浏览器仪表盘(:8802)。离线静默，不阻塞主流程。"""
+    try:
+        s = requests.Session()
+        s.trust_env = False
+        s.post("http://127.0.0.1:8802/api/event",
+               json={"kind": kind, "text": msg}, timeout=2)
+    except Exception:
+        pass
+
+def _console_boot():
+    """自动拉起浏览器仪表盘: 已在跑→直接开页; 没跑→独立进程启动再开页。"""
+    import subprocess as _sp
+    import webbrowser as _wb
+    url = "http://127.0.0.1:8802"
+    try:
+        s = requests.Session()
+        s.trust_env = False
+        s.get(url + "/api/state", timeout=2)
+        _wb.open(url)                    # 已在跑: 只开页
+        return
+    except Exception:
+        pass
+    try:
+        _sp.Popen([sys.executable, "-X", "utf8",
+                   os.path.join(HERE, "console_server.py")],
+                  creationflags=0x00000008 | 0x00000200)   # DETACHED|NEW_GROUP
+        time.sleep(2.5)
+        _wb.open(url)
+        log("浏览器仪表盘: %s (已自动启动, 关闭主程序后仍在)" % url)
+        _duplex_event("info", "仪表盘已随主程序启动")
+    except Exception as e:
+        log("仪表盘自动启动失败(不影响语音): " + repr(e))
+
+def _reply_short(text):
+    """短回复(确认类): 旧式同步播 + 短静默窗口。"""
+    global _tts_until
+    _tts_until = time.time() + max(2.0, len(text) * 0.22)
+    if _dialogue:
+        _dialogue.speak(text)
+    log("助手: " + text)
+    _duplex_event("reply", text)
+
+def _chat_reply_stream(text):
+    """全双工聊天主路径。
+
+    与旧版差异:
+        - LLM 流式: 首句生成完就开口(原版等整段)
+        - TTS 异步可打断: 播报中监听麦克风, 人声持续>=0.35s 即停(原版静默硬等)
+        - 打断时 _tts_until 立即清零: 用户插话内容会被正常识别处理
+    回声对策见 duplex.BargeInMonitor(外放可用, 耳机最佳)。
+    """
+    global _spk_async, _bargein, _tts_until
+    import duplex as _dx
+    if _spk_async is None:
+        _spk_async = _dx.AsyncSpeaker()
+    if _bargein is None:
+        _bargein = _dx.BargeInMonitor(
+            on_interrupt=lambda: None,
+            rms_threshold=float(CONFIG.get("bargein_rms", 0.02)))
+        _bargein.start()
+        try:
+            lis.subscribe(_bargein.feed)
+            log("  [全双工] 打断监听已挂载 (RMS>=%.3f, 持续>=%.2fs, 需外放时调高 bargein_rms)"
+                % (_bargein.rms_threshold, _bargein.hold_s))
+        except Exception as e:
+            log("  [全双工] 音频订阅失败(打断不可用): " + repr(e))
+    hit = {"flag": False}
+    _bargein.on_interrupt = lambda: hit.__setitem__("flag", True)
+    INTERRUPT_FLAG = os.path.join(HERE, "state", "interrupt.flag")
+
+    def _stop_flag():
+        # 三路打断: 声学插话 / 仪表盘按钮(state/interrupt.flag) / 引擎内部
+        if hit["flag"]:
+            return True
+        if os.path.exists(INTERRUPT_FLAG):
+            try:
+                os.remove(INTERRUPT_FLAG)
+            except Exception:
+                pass
+            hit["flag"] = True
+            return True
+        return False
+    # 长期记忆检索注入(chat 上下文)
+    sys_extra = ""
+    try:
+        import memory_store as _mem
+        sys_extra = _mem.context_for_prompt(text)
+    except Exception:
+        pass
+    if sys_extra:
+        _duplex_event("memory", sys_extra.replace("\n", " | ")[:120])
+    set_mode("chat")
+    if OVN:
+        OVN.set("思考中…")
+    # 播报期静默(防回声段涌入); 打断时立即清零
+    _tts_until = time.time() + 600
+    parts, interrupted = [], False
+    t_llm0 = time.time()
+    try:
+        _, sent_iter = _dx.stream_chat(text, _dialogue.history,
+                                       CONFIG["llm_base"], _MODEL_ID)
+        _bargein.speaking = True        # 首句将出, 激活打断监听
+        for sent in sent_iter:
+            if _stop_flag():
+                interrupted = True
+                break
+            if not parts:
+                _duplex_event("info", "首句耗时 %.1fs" % (time.time() - t_llm0))
+                if OVN:
+                    OVN.set("回复中…\n（插话 / 仪表盘⏹ 可打断）")
+            parts.append(sent)
+            _spk_async.speak(sent)
+            # 终端流式: 单行原地刷新已生成部分(所见即所播)
+            sys.stdout.write("\r▌助手: " + "".join(parts)[-100:] + "  ")
+            sys.stdout.flush()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        if not interrupted:
+            interrupted = not _spk_async.wait_done(stop_flag=_stop_flag)
+        else:
+            _spk_async.stop()
+    except Exception as e:
+        log("  [全双工] 异常: " + repr(e))
+    finally:
+        _bargein.speaking = False
+    reply = "".join(parts)
+    if interrupted:
+        if reply:
+            reply += "…[被打断]"
+        log("  ⚡ 已打断")
+        _duplex_event("interrupt", "用户插话，停止播报")
+        _tts_until = 0.0                    # 立即放行用户的话
+    else:
+        _tts_until = time.time() + 1.0      # 正常播完, 1s 冷却防尾音
+    if reply.strip():
+        _dialogue.history.append({"role": "user", "content": text})
+        _dialogue.history.append({"role": "assistant", "content": reply})
+        log("助手: " + reply[:150] + ("..." if len(reply) > 150 else ""))
+        _duplex_event("reply", reply)
+    if len(_dialogue.history) > 20:
+        del _dialogue.history[:-20]
+
 # ---- 录制宏: 一串语音指令录成命名流程, 一句话重放 ----
 def _extract_after(text, kws):
     """提取关键词之后的名字(去标点/空格)。"""
@@ -1088,6 +1242,8 @@ def _stop_record(name):
 _DEMO_CORES = ("跟我这样做", "跟你这样做", "跟我做", "跟你做", "跟我学", "跟你学")
 _DEMO_STOP_WORDS = ("停止录制", "结束录制", "录完了", "录好了", "就到这里", "到此为止",
                     "停止", "结束", "完成", "保存", "好了", "就这样")
+# 句尾语气词: 命令常带「了吧/啊」, 剥掉后再锚定比对
+_DEMO_STOP_TAIL = ("了吧", "了嘛", "了啊", "了", "吧", "嘛", "啊", "嗯", "哦")
 
 
 def _norm_zh(s):
@@ -1102,8 +1258,30 @@ def _is_demo_wake(text):
 
 
 def _is_demo_stop(text):
+    """停止词**锚定匹配**(2026-10-14 修子串误停)。
+
+    旧写法是任意位置子串匹配, 两个真实误停:
+      - 「就这样填」 含「就这样」 -> 叙述性语句把录制打断
+      - 「就好了」   含「好了」   -> 同上
+    新规则:
+      - 长词(>=4 字, 如「停止录制」)足够特异, 任意位置命中;
+      - 其余短词必须锚定在**句尾**(命令式语气都在句尾), 可带句尾语气词;
+      - 「好了」只认独立成句 —— 「我填好了/就好了」是陈述完成, 不是下指令。
+    """
     n = _norm_zh(text)
-    return bool(n) and any(w in n for w in _DEMO_STOP_WORDS)
+    if not n:
+        return False
+    for w in _DEMO_STOP_WORDS:
+        if len(w) >= 4:
+            if w in n:
+                return True
+        elif w == "好了":
+            if n == w or any(n == w + p for p in _DEMO_STOP_TAIL):
+                return True
+        else:
+            if n.endswith(w) or any(n.endswith(w + p) for p in _DEMO_STOP_TAIL):
+                return True
+    return False
 
 
 def _demo_name_from(text):
@@ -1496,14 +1674,41 @@ class Listener:
         on_segment(audio)
 
 def on_segment(audio):
-    global _pending_flow, _tts_until
-    # TTS 播放期间屏蔽麦克风回采(助手说话时麦克风会录到自己的声音)
+    """入队即返回 —— 全部处理在 pipeline 线程串行做, 主循环(VAD)永不阻塞。
+
+    这是「卡顿/时灵时不灵」的根治点: 原版转写(1-2s)+LLM(3-7s)+TTS 全在
+    VAD 主循环线程里, 处理期间后续语音只能堆积, 播完涌出或被静默窗口丢弃。
+    现在与 Whispera 的服务化同构: 采集(实时) 与 处理(串行队列) 解耦。
+    """
+    global _tts_until
     if time.time() < _tts_until:
         return
+    try:
+        _PIPELINE_Q.put_nowait(audio)
+    except queue.Full:
+        log("  ⚠ 处理队列满(上一条还没处理完), 本段丢弃")
+        _duplex_event("warn", "处理队列满，丢弃一段语音")
+
+_PIPELINE_Q = queue.Queue(maxsize=4)
+
+def _pipeline_worker():
+    """串行消费语音段。转写/LLM/TTS/执行的阻塞都发生在这里, 不影响采集。"""
+    while True:
+        audio = _PIPELINE_Q.get()
+        try:
+            _process_segment(audio)
+        except Exception as e:
+            log("  [管线] 段处理异常: " + repr(e))
+
+def _process_segment(audio):
+    global _pending_flow, _tts_until
     if not ensure_asr_ready():
         log("  ASR 未就绪, 跳过本条")
         return
+    t0 = time.time()
     text = transcribe(audio)
+    log("  [ASR] 转写耗时 %.2fs (音频 %.1fs, 队列深度 %d)"
+        % (time.time() - t0, len(audio) / 32000.0, _PIPELINE_Q.qsize()))
     if not text or not text.strip():
         return
     shown = text.rstrip("。.，,!！?？ ").strip()   # 去掉 SenseVoice 正常句末标点, 纯展示用
@@ -1547,6 +1752,20 @@ def on_segment(audio):
         log("收到停止指令, 退出中...")
         global RUNNING
         RUNNING = False
+        return
+    # 长期记忆: 『记住/记一下 XXX』直接入库(免 LLM 判成闲聊; SQLite+bge :1236)
+    m_mem = re.match(r"^(?:请)?(?:帮我)?(?:给我)?(?:记住|记一下|记住一下)[，,：:。\s]+(.+)",
+                     text.strip())
+    if m_mem:
+        try:
+            import memory_store as _mem
+            _mid, _msg = _mem.remember(m_mem.group(1).strip(), "fact", source="voice")
+            log("  [记忆] " + _msg)
+            _duplex_event("memory", _msg)
+            _reply_short("好的，已记住。")
+        except Exception as e:
+            log("  [记忆] 失败: " + repr(e))
+            _reply_short("记不住，存储出错了。")
         return
     # 待确认状态: 流程/技能重放确认(优先)
     if _pending_flow is not None:
@@ -1601,17 +1820,10 @@ def on_segment(audio):
         _skill_recording["steps"].append(intent)
         log("  [技能录制 %d] %s %s" % (len(_skill_recording["steps"]), action,
                                        json.dumps(intent.get("params", {}), ensure_ascii=False)))
-    # 对话路由: 非命令语音 -> 多轮对话(可选 TTS)
+    # 对话路由: 非命令语音 -> 全双工聊天(流式逐句TTS, 播报中可插话打断)
     if action == "none":
         if _dialogue is not None and CONFIG.get("chat_enabled", True) and len(text.strip()) > 1:
-            reply = _dialogue.ask(text)
-            log("助手: " + reply)
-            set_mode("chat")   # 右上角状态: 聊天模式
-            if OVN:
-                OVN.set("助手：" + reply)
-            # 粗略估计朗读时长, 期间屏蔽麦克风, 避免助手听到自己声音又识别
-            _tts_until = time.time() + max(2.0, len(reply) * 0.22)
-            _dialogue.speak(reply)
+            _chat_reply_stream(text)
             return
         if intent.get("reply"):
             log("助手: " + intent.get("reply"))
@@ -1702,7 +1914,11 @@ def main():
     _dialogue = dialogue.Dialogue(CONFIG["llm_base"], model_id=_MODEL_ID,
                                  tts_enabled=CONFIG.get("tts", True))
     log("对话模块就绪" + ("" if CONFIG.get("tts", True) else "（TTS 关闭）"))
+    # 浏览器仪表盘: 随主程序自动拉起 + 打开页面(已跑则直接开浏览器; 失败不影响语音)
+    if CONFIG.get("console_enabled", True):
+        threading.Thread(target=_console_boot, daemon=True).start()
     device = choose_mic()
+    global lis
     lis = Listener(device)
     # ---- 按键听写(Typeless 式): 悬浮指示器 + 全局热键, 复用同一路麦克风 ----
     if CONFIG.get("dictation_enabled", True):
@@ -1725,6 +1941,9 @@ def main():
             log("按键听写不可用: " + repr(e)[:80])
             _dictation = None
     threading.Thread(target=stop_hotkey_watcher, daemon=True).start()
+    # 语音段处理管线(独立线程): 转写/LLM/TTS 的阻塞不再拖累 VAD 主循环
+    threading.Thread(target=_pipeline_worker, daemon=True,
+                     name="seg-pipeline").start()
     try:
         lis.start()
     except KeyboardInterrupt:
@@ -1780,8 +1999,14 @@ if __name__ == "__main__":
             got = _is_demo_wake(t)
             ok += (got == want)
             print("%-6s wake=%-5s want=%-5s | %s" % ("PASS" if got == want else "FAIL", got, want, t))
-        for t in ("停止", "录好了", "就到这里", "打开微信"):
-            print("  stop(%-6s)=%s" % (t, _is_demo_stop(t)))
+        for t, want in [("停止", True), ("停止录制", True), ("录好了", True),
+                        ("我录完了", True), ("录好了吧", True), ("先停止", True),
+                        ("就到这里", True), ("就这样", True),
+                        ("就这样填", False), ("就好了", False), ("我填好了", False),
+                        ("点击保存按钮", False), ("保存", True), ("打开微信", False)]:
+            got = _is_demo_stop(t)
+            ok += (got == want)
+            print("%-6s stop=%-5s want=%-5s | %s" % ("PASS" if got == want else "FAIL", got, want, t))
         print("  name=%r" % _demo_name_from("请你跟我这样做 叫 打卡流程"))
         print("  fallback=%s" % json.dumps(_fallback_nodes(
             [{"kind": "click", "x": 10, "y": 20, "win": {"process": "notepad.exe"}},

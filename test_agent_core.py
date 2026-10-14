@@ -36,6 +36,7 @@ v1 用 `subprocess.Popen(['notepad.exe'])` 当夹具。两个问题：
 跑法：python test_agent_core.py
 """
 import ctypes
+from ctypes import wintypes
 import os
 import subprocess
 import sys
@@ -321,10 +322,22 @@ def _clip_get():
     """读剪贴板文本（用于原样恢复用户剪贴板）。"""
     u32 = ctypes.windll.user32
     k32 = ctypes.windll.kernel32
+    # NOTE: argtypes 必须声明。ctypes 在没有 argtypes 时按 c_int 传参，
+    # 64 位 HWND 会抛 "int too long to convert"。产品代码 agent_core.py 已正确声明，
+    # 此处曾漏掉 argtypes 导致 T3 在 64 位 Windows 上必崩。
+    k32.GlobalLock.argtypes = [ctypes.c_void_p]
     k32.GlobalLock.restype = ctypes.c_void_p
     k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    k32.GlobalUnlock.restype = ctypes.c_bool
+    u32.GetClipboardData.argtypes = [wintypes.UINT]
     u32.GetClipboardData.restype = ctypes.c_void_p
     u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    u32.OpenClipboard.restype = ctypes.c_bool
+    # NOTE: CloseClipboard 保持 argtypes 未声明（等价 argtypes=[]），
+    # 以允许零参调用——它的 hwndOwner 省略时即为 NULL。
+    # 若声明成 [c_void_p] 则强制要求 1 个参数，会抛
+    # "this function takes 1 argument (0 given)"。产品代码 agent_core.py 同此写法。
+    u32.CloseClipboard.restype = ctypes.c_bool
     if not u32.OpenClipboard(None):
         return None
     try:

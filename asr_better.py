@@ -26,11 +26,28 @@
 """
 import os
 import re
+import sys
 import json
+import base64
 import threading
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# ---- R2T2(Confucius4-R2T2) 后端默认路径与热词 ----
+# 实测热词令 TER 45.7% -> 20.0%; 换成真人口音更强的场景会更稳。
+_R2T2_DEFAULT_MODEL = os.path.join(
+    HERE, "models", "Confucius4-R2T2", "Confucius4-R2T2-Q8_0.gguf")
+_R2T2_DEFAULT_MMPROJ = os.path.join(
+    HERE, "models", "Confucius4-R2T2", "mmproj-Confucius4-R2T2-Q8_0.gguf")
+_R2T2_DEFAULT_SERVER_EXE = r"E:\AI\llama.cpp-spark\llama-server.exe"
+
+DEFAULT_HOTWORDS = (
+    "Context / hotwords: ComfyUI, FLUX, Nunchaku, ControlNet, LoRA, "
+    "Wan2.2, LTXV, MiniMax-H3, FlashVSR, SeedVR2, llama, llama.cpp, "
+    "llama-swap, KVMem, agent-hub, n8n, DSH, 智能中枢, voice-assistant, "
+    "workbuddy, obsidian, Qwen3-VL, SageAttention."
+)
 
 # ---- 默认参数(可被 config.json 覆盖) ----
 DEFAULTS = {
@@ -66,6 +83,29 @@ def _load_cfg():
         except Exception:
             pass
     return {}
+
+
+def _warn(msg):
+    """故障留痕(P0-2 修复): 以前各失败点静默 return "", 代理变量残留 /
+    服务没起来时 ASR 全废, 日志里却查不到任何原因。stderr 会被主程序
+    Tee 双写进 run_assistant.log, 单独跑自测时控制台也能看到。"""
+    try:
+        sys.stderr.write("[asr_better] " + str(msg) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _session():
+    """本地请求专用 requests 会话(P0-3 修复): trust_env=False。
+
+    本机常驻代理变量(Nano :65532 等)残留时, requests 默认信任环境变量,
+    会把发往 127.0.0.1 的请求送给代理 -> 连本地 llama-server 静默失败,
+    表现为「识别突然全空且无任何报错」。"""
+    import requests
+    s = requests.Session()
+    s.trust_env = False
+    return s
 
 
 # ---------------------------------------------------------------- 音频前端
@@ -236,8 +276,7 @@ class ASRServer(ASRBase):
         self.base = base_url.rstrip("/")
         self.model = "SenseVoiceSmall"
         try:
-            import requests
-            j = requests.get(self.base + "/models", timeout=3).json()
+            j = _session().get(self.base + "/models", timeout=3).json()
             data = j.get("data") or j.get("models") or []
             if data:
                 self.model = data[0]["id"]
@@ -248,7 +287,6 @@ class ASRServer(ASRBase):
         return "server"
 
     def transcribe(self, int16_audio, language=None):
-        import requests
         import wave
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -259,15 +297,173 @@ class ASRServer(ASRBase):
                 wf.setframerate(16000)
                 wf.writeframes(int16_audio.tobytes())
             with open(path, "rb") as f:
-                r = requests.post(self.base + "/v1/audio/transcriptions",
-                                  files={"file": ("audio.wav", f, "audio/wav")},
-                                  data={"model": self.model}, timeout=30)
+                r = _session().post(self.base + "/v1/audio/transcriptions",
+                                    files={"file": ("audio.wav", f, "audio/wav")},
+                                    data={"model": self.model}, timeout=30)
+            if r.status_code != 200:
+                _warn("funasr-server HTTP %s: %s" % (r.status_code, (r.text or "")[:200]))
+                return ""
             return r.json().get("text", "")
+        except Exception as e:
+            _warn("funasr-server 转写异常: %r" % (e,))
+            return ""
         finally:
             try:
                 os.remove(path)
             except Exception:
                 pass
+
+
+class ASRR2T2(ASRBase):
+    """Confucius4-R2T2 via llama-server(OpenAI 兼容音频接口)。
+
+    热词(prepend 到 user 文本)是决定性能力: 实测令 TER 45.7% -> 20.0%。
+    默认连接外部已启动的 llama-server(r2t2_server); 若 r2t2_autostart=True 且
+    服务不可达, 则自动拉起自带 llama-server 子进程(占 GPU, 与 llama-swap 互斥)。
+    """
+
+    def __init__(self, base_url=None, hotwords=None, cfg=None):
+        import atexit
+        self._cfg = cfg or {}
+        # 归一化: 无论传入 ".../v1" 还是根地址, 都拆出 root, 端点统一拼 /v1/xxx
+        base = (base_url or self._cfg.get("r2t2_server")
+                or "http://localhost:8099/v1").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        self.root = base
+        hw = hotwords if hotwords is not None else self._cfg.get("r2t2_hotwords",
+                                                                 DEFAULT_HOTWORDS)
+        if isinstance(hw, list):                      # 配置里写成列表更友好
+            hw = "Context / hotwords: " + ", ".join(hw) if hw else ""
+        self.hotwords = hw or ""
+        self._model_id = "r2t2"
+        self._proc = None
+        atexit.register(self.stop)
+
+    # ---- 服务生命周期 ----
+    def _ping_models(self):
+        try:
+            j = _session().get(self.root + "/v1/models", timeout=3).json()
+        except Exception:
+            return False
+        d = j.get("data") or j.get("models") or []
+        if d:
+            self._model_id = d[0]["id"]
+        return True
+
+    def _spawn(self):
+        import subprocess
+        import time
+        model = self._cfg.get("r2t2_model") or _R2T2_DEFAULT_MODEL
+        mmproj = self._cfg.get("r2t2_mmproj") or _R2T2_DEFAULT_MMPROJ
+        exe = self._cfg.get("r2t2_llama_server") or _R2T2_DEFAULT_SERVER_EXE
+        port = int(self._cfg.get("r2t2_port") or 8099)
+        ngl = int(self._cfg.get("r2t2_ngl") or 99)
+        ctx = int(self._cfg.get("r2t2_ctx") or 4096)
+        if not (os.path.exists(model) and os.path.exists(mmproj)
+                and os.path.exists(exe)):
+            return False
+        self._proc = subprocess.Popen(
+            [exe, "-m", model, "--mmproj", mmproj, "--host", "127.0.0.1",
+             "--port", str(port), "-ngl", str(ngl), "-c", str(ctx), "--no-webui"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        t0 = time.time()
+        while time.time() - t0 < 180:
+            try:
+                if _session().get(self.root + "/health", timeout=3).status_code == 200:
+                    self._ping_models()
+                    return True
+            except Exception:
+                pass
+            time.sleep(2)
+        return False
+
+    def _ensure_server(self):
+        if self._ping_models():
+            return True
+        if not self._cfg.get("r2t2_autostart"):
+            return False
+        return self._spawn()
+
+    def load(self):
+        self._ensure_server()
+
+    def ready(self):
+        try:
+            return _session().get(self.root + "/health", timeout=3).status_code == 200
+        except Exception:
+            return False
+
+    def device(self):
+        return "r2t2-llama-server"
+
+    def stop(self):
+        if self._proc:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=10)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+
+    # ---- 推理 ----
+    @staticmethod
+    def _wav_b64(int16_audio):
+        import io
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(int16_audio.tobytes())
+        return base64.b64encode(buf.getvalue()).decode()
+
+    @staticmethod
+    def _clean(txt):
+        if not txt:
+            return ""
+        m = re.search(r"<asr_text>(.*)$", txt, re.S)
+        if m:
+            txt = m.group(1)
+        else:
+            txt = re.sub(r"^\s*language\s+\w+\s*", "", txt)
+        return txt.strip()
+
+    def transcribe(self, int16_audio, language=None):
+        if not self.ready() and not self._ensure_server():
+            _warn("R2T2 服务不可达且自动拉起失败(root=%s), 本次返回空" % self.root)
+            return ""
+        try:
+            b64 = self._wav_b64(int16_audio)
+        except Exception as e:
+            _warn("WAV 编码失败: %r" % (e,))
+            return ""
+        content = []
+        if self.hotwords:
+            content.append({"type": "text", "text": self.hotwords})
+        content.append({"type": "input_audio",
+                         "input_audio": {"data": b64, "format": "wav"}})
+        payload = {"messages": [{"role": "user", "content": content}],
+                   "temperature": 0, "max_tokens": 256, "stream": False}
+        try:
+            r = _session().post(self.root + "/v1/chat/completions",
+                                json=payload, timeout=180)
+            if r.status_code != 200:
+                _warn("R2T2 转写 HTTP %s: %s" % (r.status_code, (r.text or "")[:200]))
+                return ""
+            try:
+                return self._clean(r.json()["choices"][0]["message"]["content"])
+            except Exception as e:
+                _warn("R2T2 响应结构异常(缺 choices/message/content): %r | body=%s"
+                      % (e, (r.text or "")[:200]))
+                return ""
+        except Exception as e:
+            _warn("R2T2 转写请求异常: %r" % (e,))
+            return ""
 
 
 def build_asr(cfg):
@@ -278,4 +474,6 @@ def build_asr(cfg):
     if mode == "server":
         base = cfg.get("asr_server") or "http://localhost:8000/v1"
         return ASRServer(base), corr, "server"
+    if mode == "r2t2":
+        return ASRR2T2(cfg=cfg), corr, "r2t2"
     return ASRLocal(), corr, "local"

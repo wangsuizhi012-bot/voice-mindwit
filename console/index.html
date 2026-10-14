@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>voice-assistant 控制台 :8802</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--bd:#2d333b;
+  --fg:#d6deeb;--dim:#7d8799;--ok:#3fb950;--warn:#d29922;--err:#f85149;
+  --acc:#58a6ff;--purple:#bc8cff;--mono:Consolas,'Courier New',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:13px/1.5 var(--mono);
+  height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{padding:8px 14px;border-bottom:1px solid var(--bd);
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--panel)}
+header h1{font-size:14px;color:var(--acc)}
+.vbtn{padding:3px 12px;border:1px solid var(--bd);border-radius:4px;
+  background:var(--panel2);color:var(--dim);cursor:pointer;font:inherit}
+.vbtn:hover{color:var(--fg);border-color:var(--acc)}
+.vbtn.on{color:#0d1117;background:var(--acc);border-color:var(--acc);font-weight:bold}
+#vrambar{width:180px;height:10px;background:var(--panel2);border-radius:5px;
+  border:1px solid var(--bd);overflow:hidden}
+#vramfill{height:100%;background:var(--ok);width:0%}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;
+  background:var(--err);margin-right:3px}
+.dot.up{background:var(--ok)}
+.dim{color:var(--dim)}
+main{flex:1;display:grid;grid-template-columns:1fr 340px;min-height:0}
+#left{display:flex;flex-direction:column;border-right:1px solid var(--bd);min-height:0}
+#log{flex:1;overflow-y:auto;padding:10px 14px;font-size:12px}
+.line{white-space:pre-wrap;word-break:break-all;margin-bottom:2px}
+.line .t{color:var(--dim)}
+.k-info{color:var(--acc)}.k-asr{color:var(--fg)}.k-intent{color:var(--purple)}
+.k-exec{color:var(--ok)}.k-warn{color:var(--warn)}.k-error{color:var(--err)}
+.k-profile{color:#ffa657}.k-memory{color:#39c5cf}.k-selftest{color:var(--ok)}
+#cmdbar{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--bd);background:var(--panel)}
+#cmd{flex:1;background:var(--panel2);border:1px solid var(--bd);color:var(--fg);
+  padding:8px 10px;border-radius:4px;font:inherit;outline:none}
+button.go{background:var(--acc);color:#0d1117;border:0;border-radius:4px;
+  padding:8px 16px;font:inherit;cursor:pointer;font-weight:bold}
+.stopbtn{background:var(--err);color:#fff;border:0;border-radius:4px;
+  padding:8px 14px;font:inherit;cursor:pointer;font-weight:bold}
+.stopbtn:active{transform:scale(.95)}
+#cmd:focus{border-color:var(--acc)}
+#right{overflow-y:auto;padding:12px;background:var(--bg)}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:6px;
+  padding:10px 12px;margin-bottom:12px}
+.card h3{font-size:12px;color:var(--acc);margin-bottom:8px;letter-spacing:1px}
+.svc{display:flex;justify-content:space-between;padding:2px 0;font-size:12px}
+.mline{display:flex;justify-content:space-between;gap:6px;font-size:12px;
+  padding:3px 0;border-bottom:1px dashed var(--bd)}
+.mline .x{color:var(--err);cursor:pointer}
+.mrow{display:flex;gap:6px;margin-top:8px}
+.mrow input,.mrow select{background:var(--panel2);border:1px solid var(--bd);
+  color:var(--fg);padding:4px 6px;border-radius:4px;font:inherit;flex:1;min-width:0}
+.mrow button{background:var(--panel2);border:1px solid var(--bd);color:var(--fg);
+  border-radius:4px;cursor:pointer;font:inherit;padding:4px 8px}
+.vio{color:var(--warn);font-size:12px}
+#selfitems .si{display:flex;gap:8px;font-size:12px;padding:2px 0}
+.sOK{color:var(--ok)}.sWARN{color:var(--warn)}.sFAIL{color:var(--err)}
+/* ---- 配置面板 ---- */
+.cfg-grp{font-size:11px;color:var(--purple);letter-spacing:1px;
+  margin:10px 0 4px;padding-bottom:2px;border-bottom:1px dashed var(--bd)}
+.cfg-row{display:flex;align-items:flex-start;gap:6px;padding:4px 0;font-size:12px}
+.cfg-row>label{flex:1;min-width:0;word-break:break-word}
+.cfg-row input[type=text],.cfg-row input[type=number],.cfg-row select{
+  background:var(--panel2);border:1px solid var(--bd);color:var(--fg);
+  padding:3px 5px;border-radius:4px;font:inherit;width:96px;flex:none}
+.cfg-row input[type=checkbox]{flex:none;margin-top:3px}
+.cfg-help{color:var(--dim);font-size:11px;padding:0 0 4px 0;line-height:1.4}
+.chip{font-size:10px;border-radius:3px;padding:0 4px;margin-left:4px;
+  border:1px solid var(--bd);color:var(--dim);white-space:nowrap}
+.chip.rs{color:var(--warn);border-color:var(--warn)}
+.chip.live{color:var(--ok);border-color:var(--ok)}
+.chip.def{color:var(--dim);border-style:dashed}
+.cfg-dirty{color:var(--warn);font-size:11px}
+.cfg-ok{color:var(--ok);font-size:11px}
+.cfg-err{color:var(--err);font-size:11px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>voice-assistant ⚡ :8802</h1>
+  <span id="pbtns"></span>
+  <span class="dim" id="prof_note"></span>
+  <span style="flex:1"></span>
+  <span class="dim">显存</span><div id="vrambar"><div id="vramfill"></div></div>
+  <span id="vramtxt" class="dim"></span>
+  <span id="svcdots"></span>
+</header>
+<main>
+  <div id="left">
+    <div id="log"></div>
+    <div id="cmdbar">
+      <button class="stopbtn" onclick="interrupt()" title="立即停止语音播报">⏹ 打断</button>
+      <input id="cmd" placeholder='输入指令回车执行（同语音链路），如: 打开记事本 / 帮我截个图 / 记住 我喜欢直接剪切'>
+      <button class="go" onclick="sendCmd()">执行</button>
+    </div>
+  </div>
+  <div id="right">
+    <div class="card">
+      <h3>自检报告 <button class="vbtn" style="float:right;padding:1px 8px" onclick="rerunSelftest()">重跑</button></h3>
+      <div id="selfitems" class="dim">加载中...</div>
+    </div>
+    <div class="card">
+      <h3>长期记忆（bge :1236）</h3>
+      <div class="mrow">
+        <input id="mq" placeholder="语义查询...">
+        <button onclick="memRecall()">查</button>
+      </div>
+      <div class="mrow">
+        <input id="mtext" placeholder="新记忆文本...">
+        <select id="mkind"><option>fact</option><option>note</option><option>diary</option></select>
+        <button onclick="memAdd()">存</button>
+      </div>
+      <div id="memlist" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <h3>配置
+        <span style="float:right">
+          <span id="cfgDirty" class="cfg-dirty"></span>
+          <button class="vbtn" style="padding:1px 8px" onclick="saveConfig()">保存</button>
+          <button class="vbtn" style="padding:1px 8px" onclick="loadConfig(true)">重载</button>
+        </span>
+      </h3>
+      <div class="dim" style="font-size:11px;line-height:1.5">
+        只列可改白名单项。<span class="chip live">即生效</span>改完对该进程后续行为生效；
+        <span class="chip rs">需重启</span>要重启主程序。
+        <code>correction_dict / asr_vocab</code> 等受保护项需手工编辑 config.json。
+      </div>
+      <div id="cfgStatus" style="margin-top:6px"></div>
+      <div id="cfgBody" class="dim" style="margin-top:6px">加载中...</div>
+    </div>
+  </div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const ts=t=>new Date(t*1000).toTimeString().slice(0,8);
+function esc(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+function addLine(kind,text,t){
+  const d=document.createElement("div");d.className="line";
+  d.innerHTML=`<span class="t">${ts(t||Date.now()/1000)}</span> <span class="k-${kind}">[${kind}]</span> ${esc(text)}`;
+  $("#log").appendChild(d);$("#log").scrollTop=$("#log").scrollHeight;
+}
+/* SSE 事件流 */
+const es=new EventSource("/api/events");
+es.onmessage=e=>{const m=JSON.parse(e.data);addLine(m.kind,m.text,m.ts);};
+/* 状态轮询 */
+let curProfile=null;
+async function refresh(){
+  try{
+    const s=await (await fetch("/api/state")).json();
+    if(curProfile!==s.profile.name){
+      curProfile=s.profile.name;
+      $("#pbtns").innerHTML=Object.keys(s.services).length?
+        ["chat","rpa","gpu_free"].map(n=>
+          `<button class="vbtn ${n===s.profile.name?'on':''}" onclick="setProfile('${n}')">${n}</button>`).join(""):"";
+    }
+    $("#prof_note").textContent=s.profile.label+" · ASR→"+s.profile.asr_device;
+    const pct=s.vram.total?Math.round(s.vram.used/s.vram.total*100):0;
+    $("#vramfill").style.width=pct+"%";
+    $("#vramfill").style.background=pct>88?"var(--err)":pct>70?"var(--warn)":"var(--ok)";
+    $("#vramtxt").textContent=`${Math.round(s.vram.used)}/${s.vram.total}MB`;
+    $("#svcdots").innerHTML=Object.entries(s.services).map(([k,v])=>
+      `<span title="${k}:${v.port}" class="dot ${v.up?'up':''}"></span>`).join("")
+      +`<span title="llama-swap" class="dot ${s.gateway.online?'up':''}"></span>`;
+    const vio=document.querySelector(".vio");
+    if(vio)vio.remove();
+    if(s.violations.length){
+      const d=document.createElement("div");d.className="vio";
+      d.textContent="⚠ 违反档位: "+s.violations.map(v=>v.name).join(", ");
+      header.appendChild(d);
+    }
+  }catch(e){addLine("error","状态获取失败: "+e);}
+}
+const header=document.querySelector("header");
+setInterval(refresh,3000);refresh();
+/* 档位 */
+async function setProfile(n){
+  const r=await (await fetch("/api/profile",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n})})).json();
+  if(!r.ok)addLine("error","切档失败: 未知档位 "+n);
+  curProfile=null;refresh();
+}
+/* 指令 */
+async function sendCmd(){
+  const t=$("#cmd").value.trim();if(!t)return;
+  $("#cmd").value="";
+  const r=await (await fetch("/api/command",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({text:t})})).json();
+  if(!r.ok)addLine("error","失败["+r.stage+"]: "+(r.error||"").slice(0,120));
+}
+$("#cmd").addEventListener("keydown",e=>{if(e.key==="Enter")sendCmd();});
+function interrupt(){
+  fetch("/api/interrupt",{method:"POST"});
+  addLine("interrupt","⏹ 已发送打断信号");
+}
+/* 自检 */
+async function loadSelftest(){
+  const r=await (await fetch("/api/selftest")).json();
+  $("#selfitems").innerHTML=(r.items||[]).map(i=>
+    `<div class="si"><span class="s${i.status}">${i.status}</span><span>${esc(i.name)}</span><span class="dim" style="flex:1">${esc(i.detail).slice(0,60)}</span></div>`).join("")
+    ||(r.note||"(空)");
+}
+function rerunSelftest(){
+  fetch("/api/selftest",{method:"POST"});
+  addLine("info","已触发重跑，10~20s 后再点开本卡片上方查看");
+  setTimeout(loadSelftest,15000);
+}
+loadSelftest();
+/* 记忆 */
+async function memRecall(){
+  const q=$("#mq").value.trim();if(!q)return;
+  const r=await (await fetch("/api/memory?mode=recall&q="+encodeURIComponent(q))).json();
+  renderMem((r.hits||[]).map(h=>({id:h.id,kind:h.kind,text:h.text,score:h.score})));
+}
+async function memAdd(){
+  const t=$("#mtext").value.trim();if(!t)return;
+  $("#mtext").value="";
+  await fetch("/api/memory",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({text:t,kind:$("#mkind").value,source:"console"})});
+  memRecent();
+}
+async function memForget(id){
+  await fetch("/api/memory/forget",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({target:String(id)})});
+  memRecent();
+}
+async function memRecent(){
+  const r=await (await fetch("/api/memory?mode=recent&n=8")).json();
+  renderMem((r.items||[]).map(i=>({id:i.id,kind:i.kind,
+    text:i.text+(i.no_vec?" ⚠":"")})));
+}
+function renderMem(items){
+  $("#memlist").innerHTML=items.length?items.map(m=>
+    `<div class="mline"><span style="flex:1">[${m.kind}]${m.score?" "+m.score:""} ${esc(m.text)}</span><span class="x" onclick="memForget(${m.id})">×</span></div>`).join("")
+    :'<div class="dim">(空)</div>';
+}
+memRecent();
+/* ---------------- 配置面板（白名单项） ---------------- */
+let CFG_ITEMS=[];          // 服务端返回的清单（含当前值）
+let CFG_GROUPS={};         // 分组
+let CFG_ORIG={};           // 加载时的基线，用于算"改了哪些"
+function cfgEsc(s){return String(s==null?"":s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+  .replace(/"/g,"&quot;");}
+async function loadConfig(resetStatus){
+  try{
+    const r=await (await fetch("/api/config")).json();
+    CFG_ITEMS=r.items||[];CFG_GROUPS=r.groups||{};
+    CFG_ORIG={};CFG_ITEMS.forEach(i=>CFG_ORIG[i.key]=String(i.value));
+    renderConfig();
+    if(resetStatus)$("#cfgStatus").innerHTML=
+      `<span class="cfg-ok">已重载（${CFG_ITEMS.length} 项）</span>`;
+  }catch(e){
+    $("#cfgBody").innerHTML=`<span class="cfg-err">读取失败: ${cfgEsc(e.message)}</span>`;
+  }
+}
+function cfgField(it){
+  const k=cfgEsc(it.key);
+  if(it.type==="bool")
+    return `<input type="checkbox" data-k="${k}" ${it.value?"checked":""}
+      onchange="cfgChanged()">`;
+  if(it.type==="choice")
+    return `<select data-k="${k}" onchange="cfgChanged()">${
+      it.choices.map(c=>`<option value="${cfgEsc(c)}"${
+        String(c)===String(it.value)?" selected":""}>${cfgEsc(c)}</option>`).join("")
+    }</select>`;
+  if(it.type==="int"||it.type==="float"){
+    const step=it.type==="int"?1:0.01;
+    return `<input type="number" data-k="${k}" value="${cfgEsc(it.value)}"
+      step="${step}"${it.min!=null?` min="${it.min}"`:""}${
+      it.max!=null?` max="${it.max}"`:""} onchange="cfgChanged()">`;
+  }
+  return `<input type="text" data-k="${k}" value="${cfgEsc(it.value)}"
+    onchange="cfgChanged()">`;
+}
+function renderConfig(){
+  const byKey={};CFG_ITEMS.forEach(i=>byKey[i.key]=i);
+  const seen={};
+  let html="";
+  const groups=Object.keys(CFG_GROUPS).length?CFG_GROUPS:{"全部":CFG_ITEMS.map(i=>i.key)};
+  for(const g of Object.keys(groups)){
+    const keys=groups[g].filter(k=>byKey[k]&&!seen[k]);
+    if(!keys.length)continue;
+    html+=`<div class="cfg-grp">${cfgEsc(g)}</div>`;
+    for(const k of keys){
+      seen[k]=1;const it=byKey[k];
+      const chip=it.restart
+        ?'<span class="chip rs">需重启</span>'
+        :'<span class="chip live">即生效</span>';
+      const defc=(String(it.value)!==String(it.default))
+        ?`<span class="chip def">默认 ${cfgEsc(it.default)}</span>`:"";
+      html+=`<div class="cfg-row"><label>${cfgEsc(it.label)}${chip}${defc}</label>${cfgField(it)}</div>`;
+      if(it.help)html+=`<div class="cfg-help">${cfgEsc(it.help)}</div>`;
+    }
+  }
+  CFG_ITEMS.filter(i=>!seen[i.key]).forEach(i=>{
+    html+=`<div class="cfg-row"><label>${cfgEsc(i.label)}</label>${cfgField(i)}</div>`;
+  });
+  $("#cfgBody").innerHTML=html||'<div class="dim">(无可改项)</div>';
+  cfgChanged();
+}
+function cfgPatch(){
+  const p={};
+  document.querySelectorAll("#cfgBody [data-k]").forEach(el=>{
+    const k=el.getAttribute("data-k");
+    p[k]=(el.type==="checkbox")?el.checked:el.value;
+  });
+  return p;
+}
+function cfgChanged(){
+  const p=cfgPatch();const changed=[];
+  for(const k of Object.keys(p)){
+    const v=(typeof p[k]==="boolean")?String(p[k]):String(p[k]);
+    if(CFG_ORIG[k]!==undefined&&v!==CFG_ORIG[k])changed.push(k);
+  }
+  $("#cfgDirty").textContent=changed.length?`${changed.length} 项待保存`:"";
+  return changed;
+}
+async function saveConfig(){
+  const changed=cfgChanged();
+  if(!changed.length){$("#cfgStatus").innerHTML=
+    '<span class="dim">没有改动</span>';return;}
+  const p=cfgPatch();const body={};
+  changed.forEach(k=>body[k]=p[k]);
+  $("#cfgStatus").innerHTML='<span class="dim">保存中...</span>';
+  try{
+    const r=await fetch("/api/config",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!j.ok){
+      $("#cfgStatus").innerHTML=`<span class="cfg-err">未写入：${
+        cfgEsc(Object.entries(j.errors||{}).map(([k,v])=>k+": "+v).join("\n"))}</span>`;
+      return;
+    }
+    if(j.items){CFG_ITEMS=j.items;
+      CFG_ORIG={};CFG_ITEMS.forEach(i=>CFG_ORIG[i.key]=String(i.value));}
+    renderConfig();
+    const rs=j.restart_required||[];
+    let msg=`<span class="cfg-ok">已保存 ${Object.keys(j.applied||{}).length} 项`;
+    if(j.backup)msg+=` · 备份 ${cfgEsc(j.backup.split("\\").pop())}`;
+    msg+="</span>";
+    if(rs.length)msg+=`<div class="cfg-dirty">⚠ 以下几项需重启主程序才生效：${
+      cfgEsc(rs.join("、"))}</div>`;
+    $("#cfgStatus").innerHTML=msg;
+    addLine("info","配置已保存:"+JSON.stringify(j.applied));
+  }catch(e){
+    $("#cfgStatus").innerHTML=`<span class="cfg-err">请求失败: ${cfgEsc(e.message)}</span>`;
+  }
+}
+loadConfig();
+</script>
+</body>
+</html>
